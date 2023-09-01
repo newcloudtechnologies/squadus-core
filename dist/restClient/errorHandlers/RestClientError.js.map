@@ -1,0 +1,1 @@
+{"version":3,"file":"RestClientError.js","sourceRoot":"","sources":["../../../src/restClient/errorHandlers/RestClientError.ts"],"names":[],"mappings":";AAAA;;;;;;GAMG;;;AAEH,4CAAsC;AAEtC,MAAa,eAAgB,SAAQ,KAAK;IAGtC,YAAY,IAAI,GAAG,kBAAM,CAAC,WAAW,EAAE,KAAc;QACjD,KAAK,EAAE,CAAC;QACR,IAAI,CAAC,IAAI,GAAG,IAAI,CAAC;QACjB,IAAI,CAAC,KAAK,GAAG,KAAK,CAAC;IACvB,CAAC;CACJ;AARD,0CAQC"}

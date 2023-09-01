@@ -1,0 +1,4577 @@
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+const UTILS_FOLDER_PATH = './**/utils/**/*';
+const UTILS_FILES_PATH = './**/utils.ts';
+
+module.exports = {
+    collectCoverage: true,
+    collectCoverageFrom: [UTILS_FOLDER_PATH, UTILS_FILES_PATH],
+    coverageDirectory: './coverage/',
+    moduleNameMapper: {
+        '.+\\.(css|styl|less|sass|scss)$': 'identity-obj-proxy',
+        '.+\\.(jpg|jpeg|png|gif|eot|otf|webp|svg|ttf|woff|woff2|mp4|webm|wav|mp3|m4a|aac|oga)$':
+            '<rootDir>/__mocks__/fileMock.js',
+    },
+    testPathIgnorePatterns: ['/.coverage/', '/node_modules/', '/patches/'],
+    transform: {
+        '^.+\\.[t|j]sx?$': 'ts-jest',
+    },
+    coverageThreshold: {
+        [UTILS_FOLDER_PATH]: { lines: 80 },
+        [UTILS_FILES_PATH]: { lines: 80 },
+    },
+    roots: ['<rootDir>/src'],
+};
+const path = require('path');
+
+module.exports = {
+    root: true,
+    parser: '@typescript-eslint/parser',
+    parserOptions: {
+        ecmaVersion: 2020,
+        project: ['tsconfig.json'],
+        sourceType: 'module',
+    },
+    env: {
+        node: true,
+    },
+    plugins: [
+        '@typescript-eslint',
+        'notice',
+        'typescript-sort-keys',
+        'sort-exports',
+    ],
+    extends: [
+        'eslint:recommended',
+        'plugin:@typescript-eslint/recommended',
+        'prettier',
+        'plugin:import/recommended',
+    ],
+    rules: {
+        semi: 'error',
+        camelcase: 'off',
+        curly: 'error',
+        'comma-style': ['error', 'last'],
+        'max-depth': ['error', 4],
+        'no-delete-var': 'error',
+        'no-confusing-arrow': 'error',
+        'no-extra-semi': 2,
+        'no-console': [
+            'error',
+            {
+                allow: ['warn', 'error', 'time', 'timeEnd'],
+            },
+        ],
+        '@typescript-eslint/ban-ts-comment': 'warn',
+        '@typescript-eslint/explicit-function-return-type': 'warn',
+        '@typescript-eslint/no-explicit-any': 'warn',
+        '@typescript-eslint/no-non-null-assertion': 'warn',
+        '@typescript-eslint/promise-function-async': 'warn',
+        '@typescript-eslint/strict-boolean-expressions': 'warn',
+        'no-warning-comments': [
+            'warn',
+            {
+                terms: ['todo', 'fixme', 'any other term'],
+                location: 'anywhere',
+            },
+        ],
+        'import/default': 'off',
+        'import/named': 'error',
+        'import/namespace': 'off',
+        'import/no-unresolved': 'off',
+        'import/no-named-as-default-member': 'off',
+        'import/order': [
+            'error',
+            {
+                groups: [
+                    'builtin',
+                    'external',
+                    'internal',
+                    ['index', 'sibling', 'parent'],
+                    'object',
+                    'type',
+                ],
+                'newlines-between': 'always',
+            },
+        ],
+        'notice/notice': [
+            'error',
+            {
+                messages: {
+                    whenFailedToMatch:
+                        "Couldn't find 'Copyright', are you sure you added it?",
+                },
+                nonMatchingTolerance: 1,
+                onNonMatchingHeader: 'replace',
+                templateFile: path.resolve(
+                    __dirname,
+                    '..',
+                    'copyrightTemplate.js',
+                ),
+            },
+        ],
+        'no-duplicate-imports': 'error',
+        'no-unneeded-ternary': 'error',
+        'no-useless-escape': 'error',
+        'typescript-sort-keys/interface': 'error',
+        'typescript-sort-keys/string-enum': 'error',
+        // next two rules works together
+        'no-unused-vars': 'off',
+        '@typescript-eslint/no-unused-vars': 'error',
+        'sort-exports/sort-exports': ['off'],
+    },
+    overrides: [
+        {
+            files: ['src/restClient/types/index.ts'],
+            rules: {
+                'sort-exports/sort-exports': ['error', { sortDir: 'asc' }],
+            },
+        },
+    ],
+    ignorePatterns: ['jest.config.js'],
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import WebSocket from 'universal-ws-client';
+import { BehaviorSubject, Subject, filter, take, Subscription } from 'rxjs';
+
+import {
+    getReopenInterval,
+    loginParams,
+    getEvent,
+    isSubscriptionResponse,
+    getValidHost,
+} from './utils';
+import {
+    Collections,
+    CommonEventNames,
+    DEFAULT_PING_MS,
+    Method,
+    WsEventMessage,
+    NO_ID_MSG_REG_EXP,
+    RESPONSE_TIMEOUT,
+    Status,
+    USER_DISCONNECT_CODE_CLOSE,
+    UserEventNames,
+    RoomEventNames,
+} from './constants';
+import {
+    LoginResult,
+    WsSubscription,
+    LoginParams,
+    WsData,
+    SendParams,
+    SubscriptionResponseData,
+    SendResponse,
+    UnsubscribeResponseData,
+    CallResponseData,
+    ResponseError,
+} from './types';
+
+export class WSClient {
+    events$: Subject<WsData> = new Subject();
+    status$ = new BehaviorSubject<Status>(Status.Closed);
+    host: string;
+    pingTimeout?: NodeJS.Timer | number;
+    openTimeout?: NodeJS.Timer | number;
+    config: { host: string; ping: number };
+    connection?: WebSocket;
+    lastPing = 0;
+    subscriptions: { [id: string]: WsSubscription } = {};
+    userId: string | null;
+    resume: LoginResult | null;
+    counter = 0;
+    reopenCounter = 0;
+
+    constructor(host: string, ping = DEFAULT_PING_MS) {
+        if (!host) {
+            throw '[wsClient] constructor() wrong host argument';
+        }
+        this.config = {
+            host,
+            ping,
+        };
+        this.userId = null;
+        this.resume = null;
+        this.host = getValidHost(host);
+
+        this.on(WsEventMessage.Ping, async () => {
+            this.lastPing = Date.now();
+            try {
+                await this.send({ msg: WsEventMessage.Pong });
+            } catch (error) {
+                console.error(`[wsClient] Send pong error: `, error);
+            }
+        });
+    }
+
+    private _onOpen = async (callback: () => void): Promise<void> => {
+        this.lastPing = Date.now();
+        try {
+            await this.send({
+                msg: WsEventMessage.Connect,
+                version: '1',
+                support: ['1', 'pre2', 'pre1'],
+            });
+        } catch (error) {
+            console.error(`[wsClient] _onOpen() error: `, error);
+        }
+
+        this.status$.next(Status.Open);
+        this.reopenCounter = 0;
+        clearInterval(this.openTimeout);
+        this.openTimeout = 0;
+        callback();
+        this._ping();
+    };
+
+    private _onClose = (event: WebSocket.CloseEvent): void => {
+        this.status$.next(Status.Closed);
+        if (event.code !== USER_DISCONNECT_CODE_CLOSE) {
+            this.reopen();
+        }
+    };
+
+    private _ping = async (): Promise<void> => {
+        this.pingTimeout && clearTimeout(this.pingTimeout);
+        this.pingTimeout = setTimeout(async () => {
+            try {
+                await this.send({ msg: WsEventMessage.Ping });
+                this._ping();
+            } catch (error) {
+                this.reopen();
+                console.error(`[wsClient] _ping() error: `, error);
+            }
+        }, this.config.ping);
+    };
+
+    private _call = async (
+        method: string,
+        ...params: unknown[]
+    ): Promise<{ [key: string]: unknown } | undefined> => {
+        try {
+            const response = (await this.send({
+                msg: WsEventMessage.Method,
+                method,
+                params,
+            })) as CallResponseData;
+            return response?.result;
+        } catch (error) {
+            console.error(`[wsClient] _call() error: `, error);
+            throw error;
+        }
+    };
+
+    private _getMsgId = (message: SendParams): string => {
+        return message.id || `ddp-${this.counter++}`;
+    };
+
+    private _unsubscribeAll = async (): Promise<void> => {
+        const unsubscribeArray = Object.keys(this.subscriptions).map(
+            async (id) => {
+                return this.subscriptions[id]?.unsubscribe();
+            },
+        );
+        try {
+            await Promise.all(unsubscribeArray);
+            this.subscriptions = {};
+        } catch (error) {
+            console.error(`[wsClient] _unsubscribeAll() error: `, error);
+        }
+    };
+
+    open = async (): Promise<void> => {
+        return new Promise((resolve, reject) => {
+            let connection: WebSocket;
+            if (this.isConnected()) {
+                this._ping();
+                return resolve();
+            }
+            try {
+                connection = new WebSocket(this.host) as WebSocket;
+                connection.onerror = reject;
+            } catch (error) {
+                const wsError = error as WebSocket.ErrorEvent;
+                console.error(`[wsClient] open() error: ${wsError.message}`);
+                return reject(wsError.message);
+            }
+            if (this.connection != undefined) {
+                this.connection.terminate();
+            }
+
+            this.connection = connection;
+            this.connection.onmessage = this.onMessage.bind(this);
+            this.connection.onclose = this._onClose.bind(this);
+            this.connection.onopen = this._onOpen.bind(this, resolve);
+            this.status$.next(Status.Connecting);
+        });
+    };
+
+    isConnected(): boolean {
+        return !!(
+            this.connection?.readyState === Status.Open && this.isAlive()
+        );
+    }
+
+    onMessage = (event: WebSocket.MessageEvent): void => {
+        this.lastPing = Date.now();
+        if ('data' in event) {
+            const eventData = event.data as string;
+            const data = JSON.parse(eventData) as WsData;
+            this.events$.next(data);
+        }
+    };
+
+    close = async (): Promise<void> => {
+        if (!this.connection) {
+            return Promise.reject('Connection is undefined');
+        }
+
+        this.status$.next(Status.Closing);
+        await this._unsubscribeAll();
+
+        this.openTimeout && clearTimeout(this.openTimeout);
+        this.pingTimeout && clearTimeout(this.pingTimeout);
+
+        if (this.isConnected()) {
+            try {
+                return new Promise<void>((resolve, reject) => {
+                    this.once(WsEventMessage.Close, (data: WsData) => {
+                        if ('error' in data) {
+                            reject(data.error);
+                        } else {
+                            resolve();
+                        }
+                    });
+                });
+            } catch (error) {
+                throw `[wsClient] close() error: ${error}`;
+            } finally {
+                this.connection.close(USER_DISCONNECT_CODE_CLOSE);
+            }
+        }
+
+        return Promise.resolve();
+    };
+
+    reopen = async (): Promise<void> => {
+        if (this.openTimeout) {
+            return;
+        }
+        this.openTimeout = setTimeout(async () => {
+            this.openTimeout = 0;
+            try {
+                await this.open();
+            } catch (error) {
+                console.error(`[wsClient] reopen() error: `, error);
+                this.reopen();
+            }
+        }, getReopenInterval(this.reopenCounter++));
+    };
+
+    once = (
+        listener: string,
+        cb: (data: WsData | ResponseError) => void,
+        timeout: number = RESPONSE_TIMEOUT,
+    ): (() => void) => {
+        const responseSubscription = this.events$
+            .pipe(
+                filter(
+                    (data: WsData) =>
+                        getEvent(data) === listener ||
+                        getEvent(data) === WsEventMessage.Disconnected,
+                ),
+                take(1),
+            )
+            .subscribe((data: WsData) => {
+                clearTimeout(responseTimeoutId);
+                if (getEvent(data) === WsEventMessage.Disconnected) {
+                    const error = {
+                        error: {
+                            message: `Disconnected`,
+                        },
+                    };
+                    cb(error);
+                } else {
+                    cb(data as WsData);
+                }
+            });
+
+        const responseTimeoutId = setTimeout(() => {
+            responseSubscription.unsubscribe();
+            const error = {
+                error: {
+                    message: `Can't receive response for event: "${listener}"`,
+                },
+            };
+            cb(error);
+        }, timeout);
+
+        const unsubscribe = (): void => {
+            responseSubscription.unsubscribe();
+            clearTimeout(responseTimeoutId);
+        };
+
+        return unsubscribe;
+    };
+
+    on = (event: string, cb: (data: WsData) => void): Subscription => {
+        return this.events$
+            .pipe(filter((data) => getEvent(data) === event))
+            .subscribe((data) => cb(data));
+    };
+
+    send = async (message: SendParams): Promise<SendResponse | undefined> => {
+        /* eslint-disable no-async-promise-executor */
+        return new Promise<SendResponse>(async (resolve, reject) => {
+            if (!this.connection) {
+                throw 'Sending message without open connection';
+            }
+
+            const modelObjectId = NO_ID_MSG_REG_EXP.test(message.msg)
+                ? {}
+                : { id: this._getMsgId(message) };
+            const data = {
+                ...message,
+                ...modelObjectId,
+            };
+            const stringData = JSON.stringify(data);
+
+            try {
+                this.connection.send(stringData);
+            } catch (error: unknown) {
+                const wsError = error as Error;
+                console.error(
+                    `[wsClient] send() error: sending data ${wsError.message}`,
+                );
+                reject(wsError.message);
+            }
+
+            const listener =
+                (data.msg === WsEventMessage.Ping && WsEventMessage.Pong) ||
+                (data.msg === WsEventMessage.Connect &&
+                    WsEventMessage.Connected) ||
+                data.id;
+            if (listener === undefined) {
+                return resolve(undefined);
+            }
+
+            this.once(listener, (result: WsData | ResponseError) => {
+                const sendResult = result as SendResponse | ResponseError;
+                if (sendResult && 'error' in sendResult) {
+                    reject(sendResult.error.message);
+                } else {
+                    resolve(sendResult);
+                }
+            });
+        });
+    };
+
+    isAlive = (): boolean => {
+        if (!this.lastPing) {
+            return false;
+        }
+        return (
+            Date.now() - this.lastPing <= this.config.ping + RESPONSE_TIMEOUT
+        );
+    };
+
+    login = async (credentials: LoginParams): Promise<LoginResult> => {
+        const params = loginParams(credentials);
+        try {
+            this.resume = (await this._call(
+                Method.Login,
+                params,
+            )) as LoginResult;
+            await this.subscribeAll();
+        } catch (error) {
+            console.error(`[wsClient] login() error: `, error);
+            throw error;
+        }
+
+        this.userId = this.resume.id;
+        return this.resume;
+    };
+
+    logout = async (): Promise<void> => {
+        this.resume = null;
+        await this._unsubscribeAll();
+        await this._call(Method.Logout);
+    };
+
+    subscribe = async (
+        name: string,
+        params: unknown[],
+        id?: string,
+    ): Promise<WsSubscription | undefined> => {
+        try {
+            const response = (await this.send({
+                msg: WsEventMessage.Sub,
+                id,
+                name,
+                params,
+            })) as SubscriptionResponseData | UnsubscribeResponseData;
+
+            if (isSubscriptionResponse(response)) {
+                id = response.subs[0];
+                const unsubscribe = this.unsubscribe.bind(
+                    this,
+                    id,
+                ) as () => Promise<UnsubscribeResponseData>;
+
+                const subscription = {
+                    id,
+                    name,
+                    params,
+                    unsubscribe,
+                };
+                this.subscriptions[id] = subscription;
+                return subscription;
+            }
+        } catch (error) {
+            console.error(`[wsClient] subscribe() error: `, error);
+            throw error;
+        }
+    };
+
+    subscribeAll = async (): Promise<void> => {
+        try {
+            const subscriptions = Object.keys(this.subscriptions).map(
+                async (key) => {
+                    const { name, params, id } = this.subscriptions[key];
+                    return this.subscribe(name, params, id);
+                },
+            );
+            await Promise.all(subscriptions);
+        } catch (error) {
+            console.error(`[wsClient] subscribeAll() error: `, error);
+        }
+    };
+
+    unsubscribe = async (id: string): Promise<UnsubscribeResponseData> => {
+        if (id in this.subscriptions) {
+            delete this.subscriptions[id];
+        } else {
+            return Promise.reject(`Id: ${id} does't exist`);
+        }
+
+        try {
+            const response = (await this.send({
+                msg: WsEventMessage.Unsub,
+                id,
+            })) as UnsubscribeResponseData;
+            return response;
+        } catch (error) {
+            console.error(`[wsClient] unsubscribe() error: `, error);
+            throw error;
+        }
+    };
+
+    subscribeNotifyAll = async (): Promise<(WsSubscription | undefined)[]> => {
+        return Promise.all(
+            [
+                CommonEventNames.PermissionsChanged,
+                CommonEventNames.PublicSettingsChanged,
+                CommonEventNames.DeleteEmojiCustom,
+                CommonEventNames.RolesChange,
+                CommonEventNames.UpdateAvatar,
+                CommonEventNames.UpdateEmojiCustom,
+            ].map(async (event) =>
+                this.subscribe(Collections.StreamNotifyAll, [
+                    event,
+                    { useCollection: false, args: [false] },
+                ]),
+            ),
+        );
+    };
+
+    subscribeLoggedNotify = async (): Promise<
+        (WsSubscription | undefined)[]
+    > => {
+        return Promise.all(
+            [
+                CommonEventNames.DeleteEmojiCustom,
+                CommonEventNames.RolesChange,
+                CommonEventNames.UpdateAvatar,
+                CommonEventNames.UpdateEmojiCustom,
+                CommonEventNames.UsersDeleted,
+                CommonEventNames.UsersNameChanged,
+            ].map(async (event) =>
+                this.subscribe(Collections.streamNotifyLogged, [
+                    event,
+                    { useCollection: false, args: [false] },
+                ]),
+            ),
+        );
+    };
+
+    subscribeNotifyUser = async (): Promise<(WsSubscription | undefined)[]> => {
+        return Promise.all(
+            [
+                UserEventNames.E2EKeyRequest,
+                UserEventNames.Message,
+                UserEventNames.Notification,
+                UserEventNames.Otr,
+                UserEventNames.RoomsChanged,
+                UserEventNames.SubscriptionsChanged,
+                UserEventNames.UiInteraction,
+                UserEventNames.UserData,
+                UserEventNames.Webrtc,
+            ].map(async (event) =>
+                this.subscribe(Collections.StreamNotifyUser, [
+                    `${this.userId}/${event}`,
+                    { useCollection: false, args: [false] },
+                ]),
+            ),
+        );
+    };
+
+    subscribeRoom = async (
+        rid: string,
+        ...args: unknown[]
+    ): Promise<(WsSubscription | undefined)[]> => {
+        return Promise.all([
+            this.subscribe(Collections.StreamRoomMessages, [
+                rid,
+                { useCollection: false, args: args },
+            ]),
+
+            this.subscribe(Collections.StreamNotifyRoom, [
+                `${rid}/${RoomEventNames.Typing}`,
+                { useCollection: false, args: args },
+            ]),
+            this.subscribe(Collections.StreamNotifyRoom, [
+                `${rid}/${RoomEventNames.DeleteMessage}`,
+                { useCollection: false, args: args },
+            ]),
+        ]);
+    };
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { sha256 } from 'js-sha256';
+
+import {
+    INITIAL_RECONNECT_INTERVAL,
+    MAX_WS_RECONNECT_INTERVAL,
+} from '../constants';
+import {
+    loginParams,
+    getEvent,
+    getReopenInterval,
+    hostToWS,
+    isAuthorizedData,
+    isCallResponse,
+    isLoginAuthenticated,
+    isLoginOAuth,
+    isLoginPass,
+    isLoginResult,
+    isPongData,
+    isServerData,
+    isSubscriptionData,
+    isSubscriptionResponse,
+    isUnsubscribeResponse,
+    getValidHost,
+} from '../utils';
+
+//call response:
+const logoutResponse = { id: 'ddp-6', msg: 'result' };
+const loginResponse = {
+    msg: 'result',
+    id: 'ddp-1',
+    result: {
+        id: '8QbMnnnWxeSLQmuQ9',
+        token: 'WR_UWZh8Yz4ohwEnLidyBTvhVIYeg5YNXvgaqLtx_fu',
+        tokenExpires: { $date: 1687427330224 },
+        type: 'resume',
+    },
+};
+
+const callResponse = loginResponse;
+const subscriptionData = {
+    msg: 'changed',
+    collection: 'stream-notify-user',
+    id: 'id',
+    fields: {
+        eventName: '8QbMnnnWxeSLQmuQ9/rooms-changed',
+        args: [],
+    },
+};
+
+const unsubscribeResponse = { msg: 'nosub', id: 'ddp-2' };
+const authorizedData = {
+    msg: 'added',
+    collection: 'users',
+    id: '8QbMnnnWxeSLQmuQ9',
+    fields: { emails: ['example@mail.ru'], username: 'example' },
+};
+
+const MESSAGE_PONG = 'pong';
+const pongData = { msg: MESSAGE_PONG };
+const subscriptionResponse = { msg: 'ready', subs: ['ddp-2'] };
+const serverData = { server_id: '0' };
+
+const DATA_ID = 'someId';
+const dataId = { id: DATA_ID };
+
+const SERVER_ID = 'someServerId';
+const serverId = { server_id: SERVER_ID };
+
+const wsEvents = {
+    callResponse,
+    subscriptionData,
+    unsubscribeResponse,
+    authorizedData,
+    pongData,
+    subscriptionResponse,
+    serverData,
+};
+
+const USERNAME = 'username';
+const PASSWORD = 'password';
+
+describe('wsClient utils', () => {
+    describe('isLoginPass', () => {
+        it('should return true on correct data', () => {
+            const correctLoginPass = {
+                user: {
+                    username: USERNAME,
+                },
+                password: {
+                    digest: PASSWORD,
+                    algorithm: 'sha-256',
+                },
+            };
+
+            expect(isLoginPass(correctLoginPass)).toBeTruthy();
+        });
+        it('should return false on empty strings', () => {
+            const wrongLoginPass = {
+                user: {
+                    username: '',
+                },
+                password: {
+                    digest: '',
+                    algorithm: 'sha-256',
+                },
+            };
+            expect(isLoginPass(wrongLoginPass)).toBeFalsy();
+        });
+    });
+
+    describe('isLoginOAuth', () => {
+        it('should return true on correct data', () => {
+            const correctCredentialsOAuth = {
+                oauth: {
+                    credentialToken: 'token',
+                    credentialSecret: 'secret',
+                },
+            };
+
+            expect(isLoginOAuth(correctCredentialsOAuth)).toBeTruthy();
+        });
+        it('should return false on empty strings', () => {
+            const wrongCredentialsOAuth = {
+                oauth: {
+                    credentialToken: '',
+                    credentialSecret: '',
+                },
+            };
+            expect(isLoginOAuth(wrongCredentialsOAuth)).toBeFalsy();
+        });
+    });
+
+    describe('isLoginAuthenticated', () => {
+        it('should return true on correct data', () => {
+            const correctCredentialsAuthenticated = {
+                resume: 'token',
+            };
+
+            expect(
+                isLoginAuthenticated(correctCredentialsAuthenticated),
+            ).toBeTruthy();
+        });
+        it('should return false on empty strings', () => {
+            const wrongCredentialsAuthenticated = {
+                resume: '',
+            };
+            expect(
+                isLoginAuthenticated(wrongCredentialsAuthenticated),
+            ).toBeFalsy();
+        });
+    });
+
+    describe('isLoginResult', () => {
+        it('should return true on correct data', () => {
+            const correctCredentialsAuthenticated = {
+                token: 'token',
+            };
+
+            // @ts-expect-error wrong type on purpose
+            expect(isLoginResult(correctCredentialsAuthenticated)).toBeTruthy();
+        });
+        it('should return false on empty strings', () => {
+            const wrongCredentialsAuthenticated = {
+                token: '',
+            };
+            // @ts-expect-error wrong type on purpose
+            expect(isLoginResult(wrongCredentialsAuthenticated)).toBeFalsy();
+        });
+    });
+
+    describe('getReopenInterval', () => {
+        const counter = MAX_WS_RECONNECT_INTERVAL / INITIAL_RECONNECT_INTERVAL;
+        it('should return MAX INTERVAL if counter is height ', () => {
+            expect(getReopenInterval(counter)).toBe(MAX_WS_RECONNECT_INTERVAL);
+        });
+        it('should return correct interval', () => {
+            const interval = INITIAL_RECONNECT_INTERVAL * (counter - 1);
+            expect(getReopenInterval(counter - 1)).toBe(interval);
+        });
+    });
+
+    describe('hostToWS', () => {
+        it('should return ws host with ssl', () => {
+            expect(hostToWS('https://im.example.ru')).toBe(
+                'wss://im.example.ru',
+            );
+        });
+        it('should return ws host without ssl', () => {
+            expect(hostToWS('http://im.example.ru')).toBe('ws://im.example.ru');
+        });
+    });
+
+    describe('isSubscriptionData', () => {
+        it('should return true only with subscriptionData ', () => {
+            const filterResult = Object.entries(wsEvents).filter(([, object]) =>
+                // @ts-expect-error wrong type on purpose
+                isSubscriptionData(object),
+            );
+            expect(filterResult.length).toBe(1);
+            expect(filterResult[0][0]).toBe('subscriptionData');
+        });
+    });
+
+    describe('isAuthorizedData', () => {
+        it('should return true only with authorizedData', () => {
+            const filterResult = Object.entries(wsEvents).filter(([, object]) =>
+                // @ts-expect-error wrong type on purpose
+                isAuthorizedData(object),
+            );
+            expect(filterResult.length).toBe(1);
+            expect(filterResult[0][0]).toBe('authorizedData');
+        });
+    });
+
+    describe('isPongData', () => {
+        it('should return true only with pongData', () => {
+            const filterResult = Object.entries(wsEvents).filter(([, object]) =>
+                // @ts-expect-error wrong type on purpose
+                isPongData(object),
+            );
+            expect(filterResult.length).toBe(1);
+            expect(filterResult[0][0]).toBe('pongData');
+        });
+    });
+
+    describe('isCallResponse', () => {
+        it('should return true only with callResponse', () => {
+            const filterResult = Object.entries(wsEvents).filter(([, object]) =>
+                // @ts-expect-error wrong type on purpose
+                isCallResponse(object),
+            );
+            expect(filterResult.length).toBe(1);
+            expect(filterResult[0][0]).toBe('callResponse');
+        });
+        it('should return true with each callResponse', () => {
+            const callResponseArray = [logoutResponse, loginResponse];
+            const filterResult = callResponseArray.filter((item) =>
+                // @ts-expect-error wrong type on purpose
+                isCallResponse(item),
+            );
+            expect(filterResult.length).toBe(callResponseArray.length);
+        });
+    });
+
+    describe('isSubscriptionResponse', () => {
+        it('should return true only with subscriptionResponse', () => {
+            const filterResult = Object.entries(wsEvents).filter(([, object]) =>
+                // @ts-expect-error wrong type on purpose
+                isSubscriptionResponse(object),
+            );
+            expect(filterResult.length).toBe(1);
+            expect(filterResult[0][0]).toBe('subscriptionResponse');
+        });
+    });
+
+    describe('isUnsubscribeResponse', () => {
+        it('should return true only with unsubscribeResponse', () => {
+            const filterResult = Object.entries(wsEvents).filter(([, object]) =>
+                // @ts-expect-error wrong type on purpose
+                isUnsubscribeResponse(object),
+            );
+            expect(filterResult.length).toBe(1);
+            expect(filterResult[0][0]).toBe('unsubscribeResponse');
+        });
+    });
+
+    describe('isServerData', () => {
+        it('should return true only with serverData', () => {
+            const filterResult = Object.entries(wsEvents).filter(([, object]) =>
+                // @ts-expect-error wrong type on purpose
+                isServerData(object),
+            );
+            expect(filterResult.length).toBe(1);
+            expect(filterResult[0][0]).toBe('serverData');
+        });
+    });
+
+    getEvent;
+    describe('getEvent', () => {
+        it('should return collection on subscriptionData', () => {
+            // @ts-expect-error wrong type on purpose
+            const event = getEvent(subscriptionData);
+            expect(event).toBe('stream-notify-user');
+        });
+        it('should return sub id on subscriptionResponse', () => {
+            // @ts-expect-error wrong type on purpose
+            const event = getEvent(subscriptionResponse);
+            expect(event).toBe('ddp-2');
+        });
+        it('should return sub id on unsubscribeResponse', () => {
+            // @ts-expect-error wrong type on purpose
+            const event = getEvent(unsubscribeResponse);
+            expect(event).toBe('ddp-2');
+        });
+        it('should return sub id on callResponse', () => {
+            // @ts-expect-error wrong type on purpose
+            const event = getEvent(callResponse);
+            expect(event).toBe('ddp-1');
+        });
+        it('should return "pong" on pongData', () => {
+            // @ts-expect-error wrong type on purpose
+            const event = getEvent(pongData);
+            expect(event).toBe(MESSAGE_PONG);
+        });
+        it('should return "someId" on dataId', () => {
+            // @ts-expect-error wrong type on purpose
+            const event = getEvent(dataId);
+            expect(event).toBe(DATA_ID);
+        });
+        it('should return undefined on serverId', () => {
+            const event = getEvent(serverId);
+            expect(event).toBeUndefined();
+        });
+        it('should return undefined on unsupported event', () => {
+            const event = getEvent({ error: new Error() });
+            expect(event).toBeUndefined();
+        });
+    });
+
+    describe('getValidHost', () => {
+        const host = 'im.host.ru';
+        const hostWithSsl = `https://${host}`;
+        it('should return modified host address', () => {
+            expect(getValidHost(host)).toBe(`ws://${host}/websocket`);
+        });
+        it('should return modified host address with additional S in prefix', () => {
+            expect(getValidHost(hostWithSsl)).toBe(`wss://${host}/websocket`);
+        });
+    });
+
+    describe('loginParams', () => {
+        it('should return source login credentials', () => {
+            const correctLoginPass = {
+                user: {
+                    username: USERNAME,
+                },
+                password: {
+                    digest: PASSWORD,
+                    algorithm: 'sha-256',
+                },
+            };
+            expect(loginParams(correctLoginPass)).toBe(correctLoginPass);
+        });
+        it('should return source OAuth credentials', () => {
+            const correctCredentialsOAuth = {
+                oauth: {
+                    credentialToken: 'token',
+                    credentialSecret: 'secret',
+                },
+            };
+            expect(loginParams(correctCredentialsOAuth)).toBe(
+                correctCredentialsOAuth,
+            );
+        });
+        it('should return source authenticated credentials', () => {
+            const correctCredentialsAuthenticated = {
+                resume: 'token',
+            };
+            expect(loginParams(correctCredentialsAuthenticated)).toBe(
+                correctCredentialsAuthenticated,
+            );
+        });
+        it('should rename "token" key to "resume" key', () => {
+            const sourceCredentialsAuthenticated = {
+                token: 'token',
+            };
+            const correctCredentialsAuthenticated = {
+                resume: 'token',
+            };
+            // @ts-expect-error wrong type on purpose
+            expect(loginParams(sourceCredentialsAuthenticated)).toStrictEqual(
+                correctCredentialsAuthenticated,
+            );
+        });
+        it('should return correctly reformated credentials', () => {
+            const credentials = {
+                username: USERNAME,
+                password: PASSWORD,
+            };
+            const responseCredentials = {
+                user: { username: credentials.username },
+                password: {
+                    digest: sha256(credentials.password),
+                    algorithm: 'sha-256',
+                },
+            };
+            expect(loginParams(credentials)).toStrictEqual(responseCredentials);
+        });
+    });
+});
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import lodashGet from 'lodash/get';
+import { sha256 } from 'js-sha256';
+
+import {
+    CredentialsPass,
+    CredentialsOAuth,
+    CredentialsAuthenticated,
+    LoginResult,
+    LoginParams,
+    SubscriptionData,
+    AuthorizedData,
+    PongData,
+    CallResponseData,
+    SubscriptionResponseData,
+    UnsubscribeResponseData,
+    ServerData,
+    WsData,
+    RoomsChangedEvent,
+} from '../types';
+import {
+    INITIAL_RECONNECT_INTERVAL,
+    MAX_WS_RECONNECT_INTERVAL,
+    WsEventMessage,
+} from '../constants';
+
+export const loginParams = (
+    credentials: LoginParams,
+): CredentialsPass | CredentialsOAuth | CredentialsAuthenticated => {
+    if (
+        isLoginPass(credentials) ||
+        isLoginOAuth(credentials) ||
+        isLoginAuthenticated(credentials)
+    ) {
+        return credentials;
+    }
+    if (isLoginResult(credentials)) {
+        const params: CredentialsAuthenticated = {
+            resume: credentials.token,
+        };
+        return params;
+    }
+    const params: CredentialsPass = {
+        user: { username: credentials.username },
+        password: {
+            digest: sha256(credentials.password),
+            algorithm: 'sha-256',
+        },
+    };
+    return params;
+};
+
+/** Password login credential type guard */
+export function isLoginPass(params: LoginParams): params is CredentialsPass {
+    if ('user' in params && 'password' in params) {
+        return !!params.user.username && !!params.password.digest;
+    } else {
+        return false;
+    }
+}
+
+/** Password login credential type guard */
+export function isLoginOAuth(params: LoginParams): params is CredentialsOAuth {
+    if ('oauth' in params) {
+        return (
+            !!params.oauth.credentialToken && !!params.oauth.credentialSecret
+        );
+    } else {
+        return false;
+    }
+}
+
+/** Password login credential type guard */
+export function isLoginAuthenticated(
+    params: LoginParams,
+): params is CredentialsAuthenticated {
+    if ('resume' in params) {
+        return !!params.resume;
+    } else {
+        return false;
+    }
+}
+
+/** Password login credential type guard */
+export function isLoginResult(params: LoginParams): params is LoginResult {
+    if ('token' in params) {
+        return !!params.token;
+    } else {
+        return false;
+    }
+}
+
+export function getReopenInterval(counter: number): number {
+    const interval = INITIAL_RECONNECT_INTERVAL * counter;
+    return interval > MAX_WS_RECONNECT_INTERVAL
+        ? MAX_WS_RECONNECT_INTERVAL
+        : interval;
+}
+
+export const getValidHost = (host: string): string =>
+    `${hostToWS(host)}/websocket`;
+
+export const hostToWS = (host: string): string => {
+    const hasSsl = /^https:\/\//.test(host);
+    host = host.replace(/^(https?:\/\/)?/, '');
+    return `ws${hasSsl ? 's' : ''}://${host}`;
+};
+
+export function isSubscriptionData(data: WsData): data is SubscriptionData {
+    if ('collection' in data && 'msg' in data) {
+        return data.msg !== WsEventMessage.Added;
+    } else {
+        return false;
+    }
+}
+
+export function isAuthorizedData(data: WsData): data is AuthorizedData {
+    if ('collection' in data && 'msg' in data) {
+        return data.msg === WsEventMessage.Added;
+    } else {
+        return false;
+    }
+}
+
+export function isPongData(data: WsData): data is PongData {
+    if ('msg' in data) {
+        return data.msg === WsEventMessage.Pong;
+    } else {
+        return false;
+    }
+}
+
+export function isCallResponse(data: WsData): data is CallResponseData {
+    if ('msg' in data) {
+        return data.msg === WsEventMessage.Result;
+    } else {
+        return false;
+    }
+}
+
+export function isSubscriptionResponse(
+    data: WsData,
+): data is SubscriptionResponseData {
+    if ('msg' in data) {
+        return data.msg === WsEventMessage.Ready;
+    } else {
+        return false;
+    }
+}
+
+export function isUnsubscribeResponse(
+    data: WsData,
+): data is UnsubscribeResponseData {
+    if ('msg' in data) {
+        return data.msg === WsEventMessage.Nosub;
+    } else {
+        return false;
+    }
+}
+
+export function isServerData(data: WsData): data is ServerData {
+    return 'server_id' in data;
+}
+
+export function getEvent(data: WsData): string | undefined {
+    if (isSubscriptionData(data)) {
+        return data.collection;
+    } else if (isSubscriptionResponse(data)) {
+        return data.subs[0];
+    } else if (isCallResponse(data) || isUnsubscribeResponse(data)) {
+        return data.id;
+    } else if ('id' in data) {
+        return data.id;
+    } else if ('msg' in data) {
+        return data.msg;
+    } else if ('server_id' in data) {
+        return undefined;
+    } else {
+        console.warn('Unsupported Event: ', data);
+        return undefined;
+    }
+}
+
+export function isRoomsChangedEvent(data: WsData): data is RoomsChangedEvent {
+    const roomsChangedRegExp = RegExp('rooms-changed', 'g');
+    const eventName = lodashGet(data, 'fields.eventName') as string | undefined;
+    if (eventName !== undefined) {
+        return roomsChangedRegExp.test(eventName);
+    } else {
+        return false;
+    }
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export * from './utils';
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { Collections, WsEventMessage } from './constants';
+import { Room, Message } from '../models';
+
+/** User credentials generic interface */
+export type Credentials = {
+    email?: string;
+    ldap?: boolean;
+    ldapOptions?: object;
+    password: string;
+    username: string;
+};
+
+export type LoginParams =
+    | CredentialsPass
+    | CredentialsOAuth
+    | CredentialsAuthenticated
+    | LoginResult
+    | Credentials;
+
+/** User credentials for password login method */
+export type CredentialsPass = {
+    password: { algorithm: string; digest: string };
+    user: { username: string };
+};
+
+export type CredentialsOAuth = {
+    oauth: { credentialSecret: string; credentialToken: string };
+};
+
+export type CredentialsAuthenticated = {
+    resume: string;
+};
+
+export type LoginResult = {
+    id: string; // userId
+    token: string;
+    tokenExpires: { $date: number };
+    type: string;
+};
+
+export type SubscriptionData =
+    | RoomsChangedEvent
+    | CommonSubscriptionData
+    | RoomEvent;
+
+export type WsData =
+    | PongData
+    | ServerData
+    | ConnectedData
+    | AuthorizedData
+    | CallResponseData
+    | SubscriptionResponseData
+    | SubscriptionData
+    | UnsubscribeResponseData
+    | ResponseError;
+
+export type ResponseError = {
+    error: {
+        error?: number;
+        errorType?: string;
+        isClientSafe?: true;
+        message: string;
+        reason?: string;
+    };
+    id?: string;
+    msg?: string;
+};
+
+export type PongData = { msg: WsEventMessage.Pong };
+
+export type ServerData = { server_id: string };
+
+export type ConnectedData = {
+    msg: WsEventMessage.Connected;
+    session: string;
+};
+
+export type AuthorizedData = {
+    collection: Collections.Users;
+    fields: {
+        emails: { address: string; verified: boolean }[];
+        username: string;
+    };
+    id: string;
+    msg: WsEventMessage.Added;
+};
+
+export type CallResponseData = {
+    id: string;
+    msg: WsEventMessage.Result;
+    result?: { [key: string]: unknown };
+};
+
+export type SendResponse =
+    | CallResponseData
+    | SubscriptionResponseData
+    | UnsubscribeResponseData
+    | undefined;
+
+export type SubscriptionResponseData = {
+    msg: WsEventMessage.Ready;
+    subs: string[];
+};
+
+export type SendParams = {
+    id?: string;
+    method?: string;
+    msg: WsEventMessage;
+    name?: string;
+    params?: unknown;
+    support?: string[];
+    version?: string;
+};
+
+export type UnsubscribeResponseData = { id: string; msg: WsEventMessage.Nosub };
+
+export type CommonSubscriptionData = {
+    collection: Collections;
+    fields: {
+        args: unknown[];
+        eventName: string;
+    };
+    id: string;
+    msg: WsEventMessage.Changed;
+};
+
+export type SocketMessageCallback = {
+    (data: WsData): void;
+};
+
+export type WsSubscription = {
+    id: string;
+    name: string;
+    params: unknown[];
+    unsubscribe: () => Promise<UnsubscribeResponseData>;
+};
+
+export type RoomsChangedEvent = {
+    collection: Collections.StreamNotifyUser;
+    fields: {
+        args: [string, Room];
+        eventName: string;
+    };
+    id: string;
+    msg: WsEventMessage.Changed;
+};
+
+export type RoomEvent = RoomMessageEvent | RoomTypingEvent;
+
+export type RoomMessageEvent = {
+    collection: Collections.StreamRoomMessages;
+    fields: {
+        args: [Message];
+        eventName: string;
+    };
+    id: 'id';
+    msg: WsEventMessage.Changed;
+};
+
+export type RoomTypingEvent = {
+    collection: Collections.StreamNotifyRoom;
+    fields: {
+        args: [string, boolean];
+        eventName: string;
+    };
+    id: 'id';
+    msg: WsEventMessage.Changed;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export enum UserEventNames {
+    E2EKeyRequest = 'e2ekeyRequest',
+    Message = 'message',
+    Notification = 'notification',
+    Otr = 'otr',
+    RoomsChanged = 'rooms-changed',
+    SubscriptionsChanged = 'subscriptions-changed',
+    UiInteraction = 'uiInteraction',
+    UserData = 'userData',
+    Webrtc = 'webrtc',
+}
+
+export enum RoomEventNames {
+    DeleteMessage = 'deleteMessage',
+    Typing = 'typing',
+}
+
+export enum CommonEventNames {
+    DeleteEmojiCustom = 'deleteEmojiCustom',
+    PermissionsChanged = 'permissions-changed',
+    PublicSettingsChanged = 'public-settings-changed',
+    RolesChange = 'roles-change',
+    UpdateAvatar = 'updateAvatar',
+    UpdateEmojiCustom = 'updateEmojiCustom',
+    UsersDeleted = 'Users:Deleted',
+    UsersNameChanged = 'Users:NameChanged',
+}
+
+export enum Collections {
+    StreamNotifyAll = 'stream-notify-all',
+    StreamNotifyRoom = 'stream-notify-room',
+    StreamNotifyUser = 'stream-notify-user',
+    StreamRoomMessages = 'stream-room-messages',
+    Users = 'users',
+    streamNotifyLogged = 'stream-notify-logged',
+}
+
+export enum Method {
+    Login = 'login',
+    Logout = 'logout',
+}
+
+export enum WsEventMessage {
+    Added = 'added',
+    Changed = 'changed',
+    Close = 'close',
+    Connect = 'connect',
+    Connected = 'connected',
+    Disconnected = 'disconnected',
+    Method = 'method',
+    Nosub = 'nosub',
+    Ping = 'ping',
+    Pong = 'pong',
+    Ready = 'ready',
+    Result = 'result',
+    Sub = 'sub',
+    Unsub = 'unsub',
+    Updated = 'updated',
+}
+
+export enum Status {
+    Connecting = 0,
+    Open = 1,
+    Closing = 2,
+    Closed = 3,
+}
+
+export const USER_DISCONNECT_CODE_CLOSE = 4000;
+export const DEFAULT_PING_MS = 10000;
+export const INITIAL_RECONNECT_INTERVAL = 5000;
+export const MAX_WS_RECONNECT_INTERVAL = 60000;
+export const RESPONSE_TIMEOUT = 5000;
+
+export const NO_ID_MSG_REG_EXP = new RegExp(
+    `${WsEventMessage.Connect}|${WsEventMessage.Ping}|${WsEventMessage.Pong}`,
+);
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export * from './wsClient';
+export * from './constants';
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export type Settings = {
+    [SettingsName.API_Gitlab_URL]?: string;
+    [SettingsName.Accounts_AddGuestsToChats]?: boolean;
+    [SettingsName.Accounts_AllowEmailChange]?: boolean;
+    [SettingsName.Accounts_AllowInvisibleStatusOption]?: boolean;
+    [SettingsName.Accounts_AllowPasswordChange]?: boolean;
+    [SettingsName.Accounts_AllowRealNameChange]?: boolean;
+    [SettingsName.Accounts_AllowUserAvatarChange]?: boolean;
+    [SettingsName.Accounts_AllowUserProfileChange]?: boolean;
+    [SettingsName.Accounts_AllowUserStatusMessageChange]?: boolean;
+    [SettingsName.Accounts_AllowUsernameChange]?: boolean;
+    [SettingsName.Accounts_AvatarBlockUnauthenticatedAccess]?: boolean;
+    [SettingsName.Accounts_CustomFields]?: string;
+    [SettingsName.Accounts_Directory_DefaultView]?: string;
+    [SettingsName.Accounts_EmailOrUsernamePlaceholder]?: string;
+    [SettingsName.Accounts_EmailVerification]?: boolean;
+    [SettingsName.Accounts_Iframe_api_method]?: string;
+    [SettingsName.Accounts_Iframe_api_url]?: string;
+    [SettingsName.Accounts_ManuallyApproveNewUsers]?: boolean;
+    [SettingsName.Accounts_PasswordPlaceholder]?: string;
+    [SettingsName.Accounts_PasswordReset]?: boolean;
+    [SettingsName.Accounts_RegistrationForm]?: string;
+    [SettingsName.Accounts_RegistrationForm_LinkReplacementText]?: string;
+    [SettingsName.Accounts_ShowFormLogin]?: boolean;
+    [SettingsName.Accounts_iframe_enabled]?: boolean;
+    [SettingsName.Allow_Save_Media_to_Gallery]?: boolean;
+    [SettingsName.Assets_favicon_512]?: null;
+    [SettingsName.AutoTranslate_Enabled]?: boolean;
+    [SettingsName.CAS_enabled]?: boolean;
+    [SettingsName.CAS_login_url]?: string;
+    [SettingsName.CROWD_Enable]?: boolean;
+    [SettingsName.DirectMesssage_maxUsers]?: number;
+    [SettingsName.Discussion_enabled]?: boolean;
+    [SettingsName.E2E_Enable]?: boolean;
+    [SettingsName.FEDERATION_Enabled]?: boolean;
+    [SettingsName.FileUpload_MaxFileSize]?: number;
+    [SettingsName.FileUpload_MediaTypeWhiteList]?: string;
+    [SettingsName.Force_Screen_Lock]?: boolean;
+    [SettingsName.Force_Screen_Lock_After]?: number;
+    [SettingsName.Hide_System_Messages]?: Array<string>;
+    [SettingsName.Jitsi_Domain]?: string;
+    [SettingsName.Jitsi_Enable_Channels]?: boolean;
+    [SettingsName.Jitsi_Enable_Teams]?: boolean;
+    [SettingsName.Jitsi_Enabled]?: boolean;
+    [SettingsName.Jitsi_Enabled_TokenAuth]?: boolean;
+    [SettingsName.Jitsi_SSL]?: boolean;
+    [SettingsName.Jitsi_URL_Room_Prefix]?: string;
+    [SettingsName.LDAP_Enable]?: boolean;
+    [SettingsName.Livechat_request_comment_when_closing_conversation]?: boolean;
+    [SettingsName.Message_AllowConvertLongMessagesToAttachment]?: boolean;
+    [SettingsName.Message_AllowDeleting]?: boolean;
+    [SettingsName.Message_AllowDeleting_BlockDeleteInMinutes]?: number;
+    [SettingsName.Message_AllowEditing]?: boolean;
+    [SettingsName.Message_AllowEditing_BlockEditInMinutes]?: number;
+    [SettingsName.Message_AllowPinning]?: boolean;
+    [SettingsName.Message_AllowStarring]?: boolean;
+    [SettingsName.Message_AudioRecorderEnabled]?: boolean;
+    [SettingsName.Message_GroupingPeriod]?: number;
+    [SettingsName.Message_MaxAllowedSize]?: number;
+    [SettingsName.Message_Read_Receipt_Enabled]?: boolean;
+    [SettingsName.Message_Read_Receipt_Store_Users]?: boolean;
+    [SettingsName.Message_TimeAndDateFormat]?: string;
+    [SettingsName.Message_TimeFormat]?: string;
+    [SettingsName.Site_Name]?: string;
+    [SettingsName.Site_Url]?: string;
+    [SettingsName.Store_Last_Message]?: boolean;
+    [SettingsName.Threads_enabled]?: boolean;
+    [SettingsName.UI_Allow_room_names_with_special_chars]?: boolean;
+    [SettingsName.UI_Use_Real_Name]?: boolean;
+    [SettingsName.UTF8_Names_Validation]?: string;
+    [SettingsName.uniqueID]?: string;
+};
+
+export enum SettingsName {
+    API_Gitlab_URL = 'API_Gitlab_URL',
+    Accounts_AddGuestsToChats = 'Accounts_AddGuestsToChats', // allow guests in channel
+    Accounts_AllowEmailChange = 'Accounts_AllowEmailChange',
+    Accounts_AllowInvisibleStatusOption = 'Accounts_AllowInvisibleStatusOption',
+    Accounts_AllowPasswordChange = 'Accounts_AllowPasswordChange',
+    Accounts_AllowRealNameChange = 'Accounts_AllowRealNameChange',
+    Accounts_AllowUserAvatarChange = 'Accounts_AllowUserAvatarChange',
+    Accounts_AllowUserProfileChange = 'Accounts_AllowUserProfileChange',
+    Accounts_AllowUserStatusMessageChange = 'Accounts_AllowUserStatusMessageChange',
+    Accounts_AllowUsernameChange = 'Accounts_AllowUsernameChange',
+    Accounts_AvatarBlockUnauthenticatedAccess = 'Accounts_AvatarBlockUnauthenticatedAccess',
+    Accounts_CustomFields = 'Accounts_CustomFields',
+    Accounts_Directory_DefaultView = 'Accounts_Directory_DefaultView',
+    Accounts_EmailOrUsernamePlaceholder = 'Accounts_EmailOrUsernamePlaceholder',
+    Accounts_EmailVerification = 'Accounts_EmailVerification',
+    Accounts_Iframe_api_method = 'Accounts_Iframe_api_method',
+    Accounts_Iframe_api_url = 'Accounts_Iframe_api_url',
+    Accounts_ManuallyApproveNewUsers = 'Accounts_ManuallyApproveNewUsers',
+    Accounts_PasswordPlaceholder = 'Accounts_PasswordPlaceholder',
+    Accounts_PasswordReset = 'Accounts_PasswordReset',
+    Accounts_RegistrationForm = 'Accounts_RegistrationForm',
+    Accounts_RegistrationForm_LinkReplacementText = 'Accounts_RegistrationForm_LinkReplacementText',
+    Accounts_ShowFormLogin = 'Accounts_ShowFormLogin',
+    Accounts_iframe_enabled = 'Accounts_iframe_enabled',
+    Allow_Save_Media_to_Gallery = 'Allow_Save_Media_to_Gallery',
+    Assets_favicon_512 = 'Assets_favicon_512',
+    AutoTranslate_Enabled = 'AutoTranslate_Enabled',
+    CAS_enabled = 'CAS_enabled',
+    CAS_login_url = 'CAS_login_url',
+    CROWD_Enable = 'CROWD_Enable',
+    DirectMesssage_maxUsers = 'DirectMesssage_maxUsers',
+    Discussion_enabled = 'Discussion_enabled',
+    E2E_Enable = 'E2E_Enable',
+    FEDERATION_Enabled = 'FEDERATION_Enabled',
+    FileUpload_MaxFileSize = 'FileUpload_MaxFileSize',
+    FileUpload_MediaTypeWhiteList = 'FileUpload_MediaTypeWhiteList',
+    Force_Screen_Lock = 'Force_Screen_Lock',
+    Force_Screen_Lock_After = 'Force_Screen_Lock_After',
+    Hide_System_Messages = 'Hide_System_Messages',
+    Jitsi_Domain = 'Jitsi_Domain',
+    Jitsi_Enable_Channels = 'Jitsi_Enable_Channels',
+    Jitsi_Enable_Teams = 'Jitsi_Enable_Teams',
+    Jitsi_Enabled = 'Jitsi_Enabled',
+    Jitsi_Enabled_TokenAuth = 'Jitsi_Enabled_TokenAuth',
+    Jitsi_SSL = 'Jitsi_SSL',
+    Jitsi_URL_Room_Prefix = 'Jitsi_URL_Room_Prefix',
+    LDAP_Enable = 'LDAP_Enable',
+    Livechat_request_comment_when_closing_conversation = 'Livechat_request_comment_when_closing_conversation',
+    Message_AllowConvertLongMessagesToAttachment = 'Message_AllowConvertLongMessagesToAttachment',
+    // Enable/disable deleting message
+    Message_AllowDeleting = 'Message_AllowDeleting',
+    // Amount of time to allow message deleting
+    Message_AllowDeleting_BlockDeleteInMinutes = 'Message_AllowDeleting_BlockDeleteInMinutes',
+    // Enable/disable editing message
+    Message_AllowEditing = 'Message_AllowEditing',
+    // Amount of time to allow message editing
+    Message_AllowEditing_BlockEditInMinutes = 'Message_AllowEditing_BlockEditInMinutes',
+    Message_AllowPinning = 'Message_AllowPinning',
+    Message_AllowStarring = 'Message_AllowStarring',
+    Message_AudioRecorderEnabled = 'Message_AudioRecorderEnabled',
+    Message_GroupingPeriod = 'Message_GroupingPeriod',
+    // Amount of max symbols for typing messages
+    Message_MaxAllowedSize = 'Message_MaxAllowedSize',
+    Message_Read_Receipt_Enabled = 'Message_Read_Receipt_Enabled',
+    Message_Read_Receipt_Store_Users = 'Message_Read_Receipt_Store_Users',
+    // Format of message send date which represented as combination of date and time
+    Message_TimeAndDateFormat = 'Message_TimeAndDateFormat',
+    // Format of message send date which represented as time only
+    Message_TimeFormat = 'Message_TimeFormat',
+    // Info setting about server name
+    Site_Name = 'Site_Name',
+    // Info setting about server url
+    Site_Url = 'Site_Url',
+    // Enable/disable displaying room's last message
+    Store_Last_Message = 'Store_Last_Message',
+    Threads_enabled = 'Threads_enabled',
+    UI_Allow_room_names_with_special_chars = 'UI_Allow_room_names_with_special_chars',
+    // Enable/disable using "name" field instead "username"
+    UI_Use_Real_Name = 'UI_Use_Real_Name',
+    UTF8_Names_Validation = 'UTF8_Names_Validation',
+    uniqueID = 'uniqueID',
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export enum CommonTypeGroup {
+    Application = 'application',
+    Audio = 'audio',
+    Image = 'image',
+    Text = 'text',
+    Video = 'video',
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export enum SystemMessages {
+    MessageRemoved = 'rm',
+    RoleNoLongerDefined = 'subscription-role-removed',
+    RoomArchived = 'room_archived',
+    RoomNameChanged = 'r',
+    RoomUnarchived = 'room_unarchived',
+    UserAdded = 'au',
+    UserJoin = 'uj',
+    UserJoinedConversation = 'ut',
+    UserLeft = 'ul',
+    UserMutedUnmuted = 'mute_unmute',
+    UserRemoved = 'ru',
+    WasSetRole = 'subscription-role-added',
+    Welcome = 'wm',
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export enum UserRoles {
+    Admin = 'admin',
+    Guest = 'guest',
+    Leader = 'leader',
+    LivechatAgent = 'livechat-agent',
+    LivechatManager = 'livechat-manager',
+    Moderator = 'moderator',
+    Owner = 'owner',
+    RoomGuest = 'room-guest',
+    User = 'user',
+}
+
+export enum UserStatus {
+    Away = 'away',
+    Busy = 'busy',
+    Offline = 'offline',
+    Oncall = 'oncall',
+    Online = 'online',
+    Wrong = 'wrong',
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export * from './attachment';
+export * from './conferences';
+export * from './rooms';
+export * from './settings';
+export * from './systemMessages';
+export * from './users';
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export enum ConferenceStatus {
+    Booked = 'BOOKED',
+    Created = 'CREATED',
+    Ended = 'ENDED',
+    Started = 'STARTED',
+}
+
+export enum ConferenceType {
+    Fixed = 'FIXED',
+    Personal = 'PERSONAL',
+    Regular = 'REGULAR',
+}
+
+export enum UserConferenceStatus {
+    Declined = 'DECLINED',
+    NotAnswered = 'NOT ANSWERED',
+    Participate = 'PARTICIPATE',
+    Participated = 'PARTICIPATED',
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export enum RoomEvent {
+    Delete = 'delete',
+    Leave = 'leave',
+}
+
+export enum RoomStatus {
+    Created = 'created',
+}
+
+export enum RoomType {
+    Direct = 'd',
+    Discussion = 'discussion',
+    Group = 'p',
+    OmniChannel = 'l',
+    PublicChannel = 'c',
+    Team = 't',
+    /*
+        The "thread" and "discussion" types aren't exactly fair data types. 
+        We do not receive them from the server and write them manually. An honest
+        definition of a "thread" occurs according on "tmid", "discussions" on "prid".
+
+        This is also true for enum RoomTypeFull.
+
+        TODO: looks like we need to get away from using manually written types after
+        stories SMC-2074, SMC-4543
+    */
+    Thread = 'thread',
+}
+
+export enum RoomTypeFull {
+    Direct = 'direct',
+    Discussion = 'discussion',
+    Group = 'group',
+    OmniChannel = 'omnichannel',
+    PublicChannel = 'channel',
+    Team = 'team',
+    Thread = 'thread',
+}
+
+export enum RoomTypeToAPIType {
+    c = 'channels',
+    d = 'im',
+    discussion = 'rooms',
+    l = 'channels',
+    p = 'groups',
+}
+
+export enum RoomUserRoles {
+    Guest = 'guest',
+    Leader = 'leader',
+    Moderator = 'moderator',
+    Owner = 'owner',
+    RoomGuest = 'room-guest',
+}
+
+// values of enum are written with small letters for correct work with them in places of use
+export enum RoomUserRolesPriority {
+    guest,
+    'room-guest',
+    owner,
+    moderator,
+    leader,
+}
+
+export enum RoomUserRolesUppercase {
+    Guest = 'GUEST',
+    Leader = 'LEADER',
+    Moderator = 'MODERATOR',
+    Owner = 'OWNER',
+    RoomGuest = 'ROOM-GUEST',
+}
+
+export enum SortRoomsBy {
+    Activity = 'activity',
+    Alphabetical = 'alphabetical',
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export type Reaction = { [reaction: string]: { usernames: string[] } };
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { LastMessage } from './message';
+import { RoomType } from '../constants';
+
+export type Room = {
+    _id: string;
+    _updatedAt: TimeData;
+    broadcast: boolean;
+    default: boolean;
+    description: string;
+    encrypted: boolean;
+    fname: string;
+    guestAllowed: boolean;
+    lastMessage: LastMessage;
+    lm: TimeData;
+    name: string;
+    ro: boolean;
+    sysMes: boolean;
+    t: RoomType;
+    ts: TimeData;
+    u: UserShortRecord;
+    usersCount: number;
+};
+
+export type TimeData = { $date: number };
+
+export type UserShortRecord = {
+    _id: string;
+    name?: string;
+    username: string;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { CommonTypeGroup } from '../constants/attachment';
+import { Attachment, AttachmentActions } from './attachment';
+
+export type ImageDimensions = {
+    height: number;
+    width: number;
+};
+
+export type NewAudioAttachment = NewFileAttachmentBase & {
+    typeGroup: CommonTypeGroup.Audio;
+};
+
+export type NewDocumentAttachment = NewFileAttachmentBase & {
+    document_preview: string; // preview url for mobile clients. Remove in SMC-2140
+    typeGroup: CommonTypeGroup.Application | CommonTypeGroup.Text;
+};
+
+export type NewFileAttachment =
+    | NewImageAttachment
+    | NewVideoAttachment
+    | NewAudioAttachment
+    | NewDocumentAttachment;
+
+export type NewFileAttachmentBase = {
+    _id: string;
+    // file downloadLink
+    actions?: AttachmentActions;
+    // file full mime type message->file->type
+    description: string;
+    // file description
+    documentPreviewUrl?: string;
+    // image thumbnail url
+    downloadLink: string;
+    // file preview url
+    imageThumbnailUrl?: string;
+    // file id
+    name: string;
+    // file name message->attachment->title or message->file->name
+    size: number;
+    text?: string;
+    // file byte size message->attachment->size_bytes
+    type: string;
+};
+
+export type NewImageAttachment = NewFileAttachmentBase &
+    NewImageAttachmentProps;
+
+export type NewImageAttachmentProps = {
+    imageDimensions?: ImageDimensions;
+    imagePreview?: string;
+    typeGroup: CommonTypeGroup.Image; // very small image placeholder(base64)
+};
+
+export type NewMessageFileAttachment = Attachment & {
+    file: NewFileAttachment;
+};
+
+export type NewVideoAttachment = NewFileAttachmentBase & {
+    typeGroup: CommonTypeGroup.Video;
+};
+
+export type TypeGroup = CommonTypeGroup | string;
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { NewFileAttachment } from './newAttachment';
+import { ShortUser } from './user';
+
+export type File = {
+    id: string;
+    name: string;
+    prevId: string;
+    type: string;
+};
+
+export type NewRoomFile = RoomFile & NewFileAttachment;
+
+export type RoomFile = {
+    _id: string;
+    description: string;
+    document_preview?: string;
+    document_preview_url?: string;
+    name: string;
+    size: number;
+    type: string;
+    uploadedAt: string;
+    url: string;
+    user: ShortUser;
+    userId: string;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { NewRoomFile } from './file';
+import { Message } from './message';
+import { NewFileAttachment, NewMessageFileAttachment } from './newAttachment';
+
+export type Attachment =
+    | VideoAttachment
+    | DocumentAttachment
+    | ImageAttachment
+    | AudioAttachment;
+
+export type AttachmentActions = {
+    msg: string;
+    text: string;
+    type: string;
+}[];
+
+export type AudioAttachment = BaseAttachment & {
+    audio_size?: number;
+    audio_type?: string;
+    audio_url: string;
+};
+
+export type BaseAttachment = {
+    actions?: AttachmentActions;
+    attachments?: Attachment[];
+    author_icon?: string;
+    author_link?: string;
+    author_name?: string;
+    color?: string;
+    description: string;
+    document_preview_url?: string;
+    fields?: Attachment[];
+    isFile?: boolean;
+    message_link?: string;
+    mime?: string;
+    path?: string;
+    short?: boolean;
+    size: number | string;
+    size_bytes?: number;
+    text?: string;
+    thumb_url?: string;
+    title: string;
+    title_link?: string;
+    title_link_download?: boolean;
+    ts?: Date;
+    type: string;
+    value?: string;
+};
+
+export type DocumentAttachment = BaseAttachment & {
+    document_preview: string;
+};
+
+export type ImageAttachment = BaseAttachment & {
+    image_dimensions?: { height?: number; width?: number };
+    image_preview?: string;
+    image_size?: number;
+    image_thumbnail_url?: string;
+    image_type?: string;
+    image_url: string;
+};
+
+export type ReplyAttachment = ReplyAttachmentBase & {
+    attachments: (NewFileAttachment | ReplyAttachment)[];
+};
+
+type ReplyAttachmentBase = {
+    author_icon: string;
+    author_link?: string;
+    author_name: string;
+    // Check if possible to reach these fields
+    description?: string;
+    fields: Attachment[];
+    forwardMessages?: Message[];
+    message_link?: string;
+    size?: string;
+    text: string;
+    thumb_url?: string;
+    title?: string;
+    title_link?: string;
+    ts?: Date;
+    type?: string;
+    // end of scope
+};
+
+export type UnnormalizedReplyAttachment = ReplyAttachmentBase & {
+    attachments: (
+        | Attachment
+        | NewRoomFile
+        | NewMessageFileAttachment
+        | UnnormalizedReplyAttachment
+    )[];
+};
+
+export type VideoAttachment = BaseAttachment & {
+    video_size?: number;
+    video_type?: string;
+    video_url: string;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export type Url = {
+    _id: number;
+    description: string;
+    image: string;
+    title: string;
+    url: string;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { TimeData } from './room';
+import { Attachment, UnnormalizedReplyAttachment } from './attachment';
+import { Reaction } from './reaction';
+import { Url } from './url';
+import { NewRoomFile } from './file';
+import { NewMessageFileAttachment } from './newAttachment';
+
+export enum E2EType {
+    Done = 'done',
+    Pending = 'pending',
+}
+
+export type EditedBy = {
+    _id: string;
+    username: string;
+};
+
+export type LastMessage = {
+    _id: string;
+    _updatedAt: Date;
+    attachments: (
+        | Attachment
+        | NewRoomFile
+        | NewMessageFileAttachment
+        | UnnormalizedReplyAttachment
+    )[];
+    channels: UserChannel[];
+    e2e: E2EType;
+    file?: MessageFile;
+    md: MarkdownAST;
+    mentions: UserMention[];
+    msg: string;
+    reactions?: Reaction[];
+    rid: string;
+    status: boolean;
+    t: MessageType;
+    tmid: string;
+    ts: Date;
+    tshow: boolean;
+    u: UserMessage;
+    unread: boolean;
+    urls: string[];
+};
+
+export type MarkdownAST = any;
+
+export type Message = {
+    _id: string;
+    _updatedAt: TimeData;
+    alias?: string;
+    attachments?: (
+        | Attachment
+        | NewRoomFile
+        | NewMessageFileAttachment
+        | UnnormalizedReplyAttachment
+    )[];
+    autoTranslate?: boolean;
+    avatar?: string;
+    blocks?: any;
+    channels?: UserChannel[];
+    dcount?: number;
+    dlm?: Date;
+    drid?: string;
+    e2e?: string;
+    editedBy?: EditedBy;
+    emoji?: string;
+    file?: MessageFile;
+    groupable?: boolean;
+    id?: string;
+    md?: MarkdownAST;
+    mentions?: UserMention[];
+    msg: string;
+    parseUrls?: boolean;
+    pinned?: boolean;
+    reactions?: Reaction;
+    replies?: string[];
+    rid: string;
+    role?: string;
+    starred?: boolean;
+    status?: number;
+    subscription?: { id: string };
+    t?: MessageType;
+    tcount?: number;
+    tlm?: Date;
+    tmid?: string;
+    tmsg?: string;
+    translations?: Translations[];
+    ts: TimeData;
+    tshow?: boolean;
+    u: UserMessage;
+    unread?: boolean;
+    urls?: Url[];
+};
+
+export type MessageFile = { _id: string; name: string; type: string };
+
+export enum MessageType {
+    DiscussionCreated = 'discussion-created',
+    Encrypted = 'e2e',
+    ForwardMessage = 'forward-message',
+    JitsiCallStarted = 'jitsi_call_started',
+    JitsiCallThread = 'jitsi_call_thread',
+    LoadMore = 'load_more',
+    Removed = 'rm',
+    UserJoined = 'uj',
+}
+
+export type Translations = {
+    _id: string;
+    language: string;
+    value: string;
+};
+
+export type UserChannel = {
+    [index: number]: string | number;
+    _id: string;
+    name: string;
+};
+
+export type UserMention = UserMessage & {
+    type: string;
+};
+
+export type UserMessage = {
+    _id: string;
+    name?: string;
+    username?: string;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export * from './attachment';
+export * from './file';
+export * from './message';
+export * from './newAttachment';
+export * from './reaction';
+export * from './room';
+export * from './url';
+export * from './user';
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { UserRoles, UserStatus } from '../constants';
+
+export type CurrentUser = ShortUser &
+    UserWithRoles & {
+        avatarETag: string;
+        customFields?: {
+            [name: string]: unknown;
+        };
+        emails?: {
+            address: string;
+            verified: boolean;
+        }[];
+        language?: string;
+        loginEmailPassword?: string;
+        showMessageInMainThread: boolean;
+        status: UserStatus;
+        statusLivechat: string;
+        statusText: string | null;
+    };
+
+export type ShortUser = {
+    id: string;
+    name: string;
+    username: string;
+};
+
+export { UserRoles, UserStatus };
+
+export type UserWithRoles = ShortUser & {
+    roles: UserRoles[];
+    token: string;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import axios, {
+    type AxiosInstance,
+    type AxiosRequestConfig,
+    type AxiosResponse,
+} from 'axios';
+
+import { RoomTypeToAPIType, SettingsName } from '../constants';
+import { Message } from '../models';
+import { Errors, StatusCode } from './constants';
+import {
+    RestClientError,
+    addUserToRoomErrorHandler,
+    createDirectErrorHandler,
+    createRoomErrorHandler,
+    getRoomInfoErrorHandler,
+    readRoomErrorHandler,
+    removeUserFromRoomErrorHandler,
+    sendAttachmentErrorHandler,
+    sendMessageErrorHandler,
+    setUserRoleErrorHandler,
+} from './errorHandlers';
+import { getUserInfoErrorHandler } from './errorHandlers/getUserInfoErrorHandler';
+import { saveRoomSettingsErrorHandler } from './errorHandlers/saveRoomSettingsErrorHandler';
+import {
+    AddUsersToRoomRequestParams,
+    CreatePrivateChannelRequestParams,
+    CreatePublicChannelRequestParams,
+    CreateUserRequestParams,
+    DirectRoomResponse,
+    GetHistoryData,
+    GetHistoryRequestParams,
+    GetRoomInfoByRoomIdRequestParams,
+    GetRoomInfoRequestParams,
+    GetRoomInfoResponse,
+    LoginRequestParams,
+    ReadRoomResponse,
+    RemoveUserFromChannelRequestParams,
+    RemoveUserFromChannelResponse,
+    RestResponse,
+    SaveRoomSettingsData,
+    SaveRoomSettingsRequestParams,
+    SccCallStartData,
+    SccCallStartRequestParams,
+    SccCreateConferenceData,
+    SccGetConferenceInfo,
+    SendAttachmentRequestParams,
+    SendMessageByGroupNameRequestParams,
+    SendMessageData,
+    SendMessageRequestParams,
+    SettingsData,
+    UserPreferencesData,
+    UserPreferencesRequestParams,
+    UserResponse,
+} from './types';
+import {
+    ChannelData,
+    ConferenceData,
+    CreatePrivateChannelResponse,
+    CreatePublicChannelResponse,
+    User,
+} from './types/models';
+import {
+    SetUserRoleRequestParams,
+    SetUserRoleResponse,
+} from './types/restAPI/changeRoles';
+import { callMeteorRequest } from './utils/callMeteorRequest';
+import { validateRestResponse } from './utils/validateRestResponse';
+import {
+    handleRestErrorByResponse,
+    AxiosErrorWithData,
+} from './utils/handleRestErrorByResponse';
+
+export function createHttpClient(serverUrl: string, userAgent?: string) {
+    const userAgentHeader = {
+        'User-Agent': userAgent,
+    };
+    return axios.create({
+        baseURL: `${serverUrl}/api/v1/`,
+        headers: {
+            'Content-Type': 'application/json;charset=UTF-8',
+            ...(userAgent && userAgentHeader),
+        },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+    });
+}
+
+export class RestClient {
+    private httpClient: AxiosInstance;
+    private isClientAuthorized = false;
+    private userAgent: string | undefined;
+    serverUrl: string;
+
+    constructor(serverUrl: string, userAgent?: string) {
+        this.httpClient = createHttpClient(serverUrl, userAgent);
+        this.userAgent = userAgent;
+        this.serverUrl = serverUrl;
+    }
+
+    post = async <T = any, R = AxiosResponse<T>, D = any>(
+        ...args: [url: string, data?: D, config?: AxiosRequestConfig<D>]
+    ): Promise<R> => this.httpClient.post(...args);
+
+    get = async <T = any, R = AxiosResponse<T>, D = any>(
+        ...args: [url: string, config?: AxiosRequestConfig<D>]
+    ): Promise<R> => this.httpClient.get(...args);
+
+    delete = async <T = any, R = AxiosResponse<T>, D = any>(
+        ...args: [url: string, config?: AxiosRequestConfig<D>]
+    ): Promise<R> => this.httpClient.delete(...args);
+
+    put = async <T = any, R = AxiosResponse<T>, D = any>(
+        ...args: [url: string, data?: D, config?: AxiosRequestConfig<D>]
+    ): Promise<R> => this.httpClient.put(...args);
+
+    private isAuthorized = (): void => {
+        if (!this.isClientAuthorized) {
+            throw new RestClientError(Errors.AuthorizationError, {});
+        }
+    };
+
+    changeServer(serverUrl: string, userAgent = this.userAgent) {
+        this.isClientAuthorized = false;
+        this.httpClient = createHttpClient(serverUrl, userAgent);
+    }
+
+    saveToken(userId: string, authToken: string) {
+        if (!userId || !authToken) {
+            console.warn('RestClient.saveToken() invalid params');
+            return;
+        }
+        this.httpClient.defaults.headers.common['X-User-Id'] = userId;
+        this.httpClient.defaults.headers.common['X-Auth-Token'] = authToken;
+        this.isClientAuthorized = true;
+    }
+
+    login = async (props: LoginRequestParams): Promise<string | undefined> => {
+        const { userName: user, password, token: resume } = props;
+        const url = 'login';
+        let data;
+        if (resume) {
+            data = { resume };
+        } else if (user && password) {
+            data = { user, password };
+        }
+
+        return await this.httpClient
+            .post(url, data)
+            .then((response) => {
+                if (response.status === StatusCode.OK && response.data) {
+                    const { data: responseData } = response.data;
+                    const { userId, authToken } = responseData;
+                    this.saveToken(userId, authToken);
+                    return authToken;
+                } else {
+                    throw new RestClientError(
+                        Errors.AuthorizationError,
+                        response,
+                    );
+                }
+            })
+            .catch((error) =>
+                handleRestErrorByResponse(error as AxiosErrorWithData),
+            );
+    };
+
+    // Create
+    createUser = async (
+        params: CreateUserRequestParams,
+    ): RestResponse<User> => {
+        this.isAuthorized();
+        const { userName: username, password, name, email, roles } = params;
+        try {
+            const url = 'users.create';
+            const data = {
+                username,
+                password,
+                name,
+                email,
+                ...(roles?.length && { roles: roles }),
+            };
+            const response = await this.httpClient.post(url, data);
+            validateRestResponse(response);
+            return response;
+        } catch (error) {
+            handleRestErrorByResponse(error as AxiosErrorWithData);
+        }
+    };
+
+    createChannel = async (
+        params: CreatePublicChannelRequestParams,
+    ): RestResponse<CreatePublicChannelResponse> => {
+        this.isAuthorized();
+        const { name, members, readOnly, teamId } = params;
+        try {
+            const url = 'channels.create';
+            const data = {
+                name,
+                members,
+                readOnly,
+                extraData: {
+                    // server will treat chat as encrypted
+                    // if we do not pass encrypted: false field
+                    encrypted: false,
+                    ...(teamId && { teamId }),
+                },
+            };
+            const response = await this.httpClient.post(url, data);
+            validateRestResponse(response);
+            return response;
+        } catch (error) {
+            handleRestErrorByResponse(
+                error as AxiosErrorWithData,
+                createRoomErrorHandler,
+            );
+        }
+    };
+
+    createGroup = async (
+        params: CreatePrivateChannelRequestParams,
+    ): RestResponse<CreatePrivateChannelResponse> => {
+        this.isAuthorized();
+        const { name, members, readOnly, encrypted, teamId } = params;
+        try {
+            const url = 'groups.create';
+            const data = {
+                name,
+                members,
+                readOnly,
+                extraData: {
+                    encrypted,
+                    ...(teamId && { teamId }),
+                },
+            };
+            const response = await this.httpClient.post(url, data);
+            validateRestResponse(response);
+            return response;
+        } catch (error) {
+            handleRestErrorByResponse(
+                error as AxiosErrorWithData,
+                createRoomErrorHandler,
+            );
+        }
+    };
+
+    sccCreateConference = async (
+        conferenceData: ConferenceData,
+    ): Promise<SccCreateConferenceData | undefined> => {
+        this.isAuthorized();
+        return await callMeteorRequest({
+            httpClient: this.httpClient,
+            method: 'scc:createConference',
+            params: [conferenceData],
+        });
+    };
+
+    // Post
+
+    async removeUserFromChannel(
+        params: RemoveUserFromChannelRequestParams,
+    ): RestResponse<RemoveUserFromChannelResponse> {
+        const { rid: roomId, username, roomType } = params;
+        const entity = RoomTypeToAPIType[roomType];
+        try {
+            const response = await this.post(`${entity}.kick`, {
+                roomId,
+                username,
+            });
+            validateRestResponse(response);
+            return response;
+        } catch (error: any) {
+            handleRestErrorByResponse(
+                error as AxiosErrorWithData,
+                removeUserFromRoomErrorHandler,
+            );
+        }
+    }
+
+    async createDirectRoom(username: string): RestResponse<DirectRoomResponse> {
+        try {
+            const response = await this.post('im.create', { username });
+            validateRestResponse(response);
+            return response;
+        } catch (error) {
+            handleRestErrorByResponse(
+                error as AxiosErrorWithData,
+                createDirectErrorHandler,
+            );
+        }
+    }
+
+    // Get
+
+    async getUserInfoByUsername(username: string): RestResponse<UserResponse> {
+        try {
+            const response = await this.get('users.info', {
+                params: { username: username },
+            });
+            validateRestResponse(response);
+            return response;
+        } catch (error) {
+            handleRestErrorByResponse(
+                error as AxiosErrorWithData,
+                getUserInfoErrorHandler,
+            );
+        }
+    }
+
+    async getSettings(
+        settings?: Array<SettingsName>,
+    ): RestResponse<SettingsData> {
+        try {
+            const query = settings?.length
+                ? `?query={"_id":{"$in":${JSON.stringify(settings)}}}&count=${
+                      settings.length
+                  }`
+                : '';
+            const response = await this.get(`settings.public${query}`);
+            validateRestResponse(response);
+            return response;
+        } catch (error) {
+            handleRestErrorByResponse(error as AxiosErrorWithData);
+        }
+    }
+
+    getChannelInfo = async (channelName: string): RestResponse<ChannelData> => {
+        this.isAuthorized();
+        try {
+            const url = 'channels.info';
+            const response = await this.httpClient.get(url, {
+                params: {
+                    roomName: channelName,
+                },
+            });
+            validateRestResponse(response);
+            return response;
+        } catch (error) {
+            handleRestErrorByResponse(error as AxiosErrorWithData);
+        }
+    };
+
+    setUserRole = async ({
+        roomId,
+        t,
+        userId,
+        roleName,
+        roleValue,
+    }: SetUserRoleRequestParams): RestResponse<SetUserRoleResponse> => {
+        const action = roleValue ? 'add' : 'remove';
+        try {
+            const response = await this.post(
+                `${RoomTypeToAPIType[t]}.${action}${roleName}`,
+                {
+                    roomId,
+                    userId,
+                },
+            );
+            validateRestResponse(response);
+            return response;
+        } catch (error) {
+            handleRestErrorByResponse(
+                error as AxiosErrorWithData,
+                setUserRoleErrorHandler,
+            );
+        }
+    };
+
+    // remove at scope of SMC-5468
+    getRoomInfoByRoomId = async (
+        params: GetRoomInfoByRoomIdRequestParams,
+    ): RestResponse<GetRoomInfoResponse> => {
+        this.isAuthorized();
+        try {
+            const url = 'rooms.info';
+            const response = await this.httpClient.get(url, {
+                params: { roomId: params.rid, roomName: params.roomName },
+            });
+            validateRestResponse(response);
+            return response;
+        } catch (error) {
+            handleRestErrorByResponse(
+                error as AxiosErrorWithData,
+                getRoomInfoErrorHandler,
+            );
+        }
+    };
+
+    getRoomInfo = async (
+        params: GetRoomInfoRequestParams,
+    ): RestResponse<GetRoomInfoResponse> => {
+        this.isAuthorized();
+        try {
+            const url = 'rooms.info';
+            const response = await this.httpClient.get(url, {
+                params: { roomId: params.rid, roomName: params.roomName },
+            });
+            validateRestResponse(response);
+            return response;
+        } catch (error) {
+            handleRestErrorByResponse(
+                error as AxiosErrorWithData,
+                getRoomInfoErrorHandler,
+            );
+        }
+    };
+
+    getHistory = async (
+        params: Array<GetHistoryRequestParams>,
+    ): RestResponse<GetHistoryData> => {
+        this.isAuthorized();
+        return await callMeteorRequest({
+            httpClient: this.httpClient,
+            method: 'loadHistory',
+            params,
+        });
+    };
+
+    getOAuthSettings = async () => {
+        this.isAuthorized();
+        try {
+            const url = 'settings.oauth';
+            const response = await this.httpClient.get(url);
+            validateRestResponse(response);
+            const { data: oauthServices } = response;
+            return oauthServices;
+        } catch (error) {
+            handleRestErrorByResponse(error as AxiosErrorWithData);
+        }
+    };
+
+    sccGetConferenceInfo = async (
+        conferenceNumber: string,
+    ): RestResponse<SccGetConferenceInfo> => {
+        this.isAuthorized();
+        return await callMeteorRequest({
+            httpClient: this.httpClient,
+            method: 'scc:getConferenceInfo',
+            params: [conferenceNumber],
+        });
+    };
+
+    sccGetFullConferenceInfo = async (
+        conferenceNumber: string,
+        query: string,
+    ): RestResponse<SccGetConferenceInfo> => {
+        this.isAuthorized();
+        const params: { conferenceNumber: string; username?: string } = {
+            conferenceNumber,
+        };
+        if (query?.length) {
+            params['username'] = query;
+        }
+        try {
+            const url = 'scc.getFullConferenceInfo';
+            const response = await this.httpClient.get(url, {
+                params,
+            });
+            validateRestResponse(response);
+            return response;
+        } catch (error) {
+            handleRestErrorByResponse(error as AxiosErrorWithData);
+        }
+    };
+
+    // Update
+
+    addUsersToRoom = async (
+        params: Array<AddUsersToRoomRequestParams>,
+    ): RestResponse<boolean> => {
+        this.isAuthorized();
+        return await callMeteorRequest(
+            {
+                httpClient: this.httpClient,
+                method: 'addUsersToRoom',
+                params,
+            },
+            addUserToRoomErrorHandler,
+        );
+    };
+
+    saveRoomSettings = async (
+        params: SaveRoomSettingsRequestParams,
+    ): RestResponse<SaveRoomSettingsData> => {
+        this.isAuthorized();
+        try {
+            const url = 'rooms.saveRoomSettings';
+            const response = await this.httpClient.post(url, params);
+            validateRestResponse(response);
+            return response;
+        } catch (error) {
+            handleRestErrorByResponse(
+                error as AxiosErrorWithData,
+                saveRoomSettingsErrorHandler,
+            );
+        }
+    };
+
+    setUserPreferences = async (
+        params: UserPreferencesRequestParams,
+    ): RestResponse<UserPreferencesData> => {
+        this.isAuthorized();
+        const { userId, data } = params;
+        try {
+            const url = 'users.setPreferences';
+            const response = await this.httpClient.post(url, { userId, data });
+            validateRestResponse(response);
+            return response;
+        } catch (error) {
+            handleRestErrorByResponse(error as AxiosErrorWithData);
+        }
+    };
+
+    // Send message
+
+    sendMessageByGroupName = async (
+        params: SendMessageByGroupNameRequestParams,
+    ): RestResponse<SendMessageData> => {
+        this.isAuthorized();
+        const { groupName, msg } = params;
+        try {
+            const url = 'chat.postMessage';
+            const data = {
+                channel: `#${groupName}`,
+                msg,
+            };
+            const response = await this.httpClient.post(url, data);
+            validateRestResponse(response);
+            return response;
+        } catch (error) {
+            handleRestErrorByResponse(error as AxiosErrorWithData);
+        }
+    };
+
+    sendMessage = async (
+        params: SendMessageRequestParams,
+    ): Promise<Message> => {
+        this.isAuthorized();
+
+        const url = 'chat.sendMessage';
+        return await this.post(url, params)
+            .then((result) => {
+                if (!result) {
+                    throw new RestClientError(Errors.EmptyResult, {});
+                }
+                validateRestResponse(result);
+                return result.data.message;
+            })
+            .catch((error) =>
+                handleRestErrorByResponse(
+                    error as AxiosErrorWithData,
+                    sendMessageErrorHandler,
+                ),
+            );
+    };
+
+    async sendAttachment(
+        params: SendAttachmentRequestParams,
+    ): Promise<Message> {
+        this.isAuthorized();
+        const { form, rid } = params;
+        return await this.post(`rooms.upload/${rid}`, form, {
+            headers: form.getHeaders(),
+        })
+            .then((response) => {
+                validateRestResponse(response);
+                const message = response.data?.message;
+                if (!message) {
+                    throw new RestClientError(Errors.EmptyResult, response);
+                }
+                return message;
+            })
+            .catch((error) =>
+                handleRestErrorByResponse(
+                    error as AxiosErrorWithData,
+                    sendAttachmentErrorHandler,
+                ),
+            );
+    }
+
+    // Conferences
+
+    sccCallStart = async (
+        params: SccCallStartRequestParams,
+    ): RestResponse<SccCallStartData> => {
+        this.isAuthorized();
+        const { conferenceNumber, rid, notify, all } = params;
+        return await callMeteorRequest({
+            httpClient: this.httpClient,
+            method: 'scc:start',
+            params: [rid, notify, conferenceNumber, all],
+        });
+    };
+
+    sccGenerateAccessToken = async (
+        jitsiRoomNumber: string,
+    ): RestResponse<string> => {
+        this.isAuthorized();
+        return await callMeteorRequest({
+            httpClient: this.httpClient,
+            method: 'scc:generateAccessToken',
+            params: [jitsiRoomNumber],
+        });
+    };
+
+    readThread = async (tmid: string): Promise<void> => {
+        this.isAuthorized();
+        return await callMeteorRequest({
+            httpClient: this.httpClient,
+            method: 'readThreads',
+            params: [tmid],
+        });
+    };
+
+    readRoom = async (rid: string): RestResponse<ReadRoomResponse> => {
+        const url = 'chat.readMessages';
+        this.isAuthorized();
+        try {
+            const result = await this.post(url, {
+                rid,
+            });
+            validateRestResponse(result);
+            return result;
+        } catch (error) {
+            handleRestErrorByResponse(
+                error as AxiosErrorWithData,
+                readRoomErrorHandler,
+            );
+        }
+    };
+
+    deleteUser = async (userId: string) => {
+        this.isAuthorized();
+        try {
+            const url = 'users.delete';
+            const data = {
+                userId,
+            };
+            const response = await this.httpClient.post(url, data);
+            validateRestResponse(response);
+            return response;
+        } catch (error) {
+            handleRestErrorByResponse(error as AxiosErrorWithData);
+        }
+    };
+
+    deleteRoom = async (roomId: string) => {
+        this.isAuthorized();
+        return await callMeteorRequest({
+            httpClient: this.httpClient,
+            method: 'eraseRoom',
+            params: [roomId],
+        });
+    };
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { type AxiosInstance } from 'axios';
+
+import { ErrorData } from '../errorHandlers';
+
+export type MeteorRequestData = {
+    method: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    params: any[];
+};
+
+export type CallMeteorRequest = {
+    (
+        params: MeteorRequestData & { httpClient: AxiosInstance },
+        specificMethodErrorHandler?: (error: ErrorData) => void,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ): Promise<any>;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import {
+    ConferenceStatus,
+    ConferenceType,
+    UserConferenceStatus,
+    RoomUserRolesUppercase,
+} from '../../../constants';
+import { User } from './user';
+
+export type ConferenceData = {
+    _id: string;
+    conferenceSettings: ConferenceSettings;
+    createdAt: Date;
+    creator: ConferenceUser;
+    invitations?: Array<User>;
+    lobbyStarted: boolean;
+    name: string;
+    number: number;
+    participants: Participants;
+    rid: string | null;
+    serviceUrl: string;
+    status: ConferenceStatus;
+    type: ConferenceType;
+};
+export type ConferenceSettings = {
+    audioMute: boolean;
+    showSettingsScreen: boolean;
+    videoMute: boolean;
+    waitingRoomEnable: boolean;
+};
+export type ConferenceUser = {
+    _id: string;
+    guest?: boolean;
+    name: string;
+    username: string;
+};
+export type Participants = ConferenceUser & {
+    invited: boolean;
+    role: RoomUserRolesUppercase;
+    status: UserConferenceStatus;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { RoomType } from '../../../constants';
+import { User } from './user';
+
+export type ChannelData = {
+    _id: string;
+    _updatedAt: Date;
+    customFields?: RoomCustomFields;
+    fname: string;
+    msgs: number;
+    name: string;
+    ro: boolean;
+    t: RoomType;
+    ts: Date;
+    u: User;
+    usersCount: number;
+};
+
+export type CreatePrivateChannelResponse = {
+    group: ChannelData;
+    success: boolean;
+};
+
+export type CreatePublicChannelResponse = {
+    channel: ChannelData;
+    success: boolean;
+};
+
+export type RoomCustomFields = {
+    // Todo fill types SMC-1733
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    [name: string]: any;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export type UserPreferences = {
+    desktopNotifications: string;
+    emailNotificationMode: string;
+    joinWithoutSound: boolean;
+    joinWithoutVideo: boolean;
+    language: string;
+    mobileNotifications: string;
+    showSettingsScreen: boolean;
+    sidebarShowUnread: boolean;
+    sidebarSortby: string;
+    turnOffAudio: boolean;
+    turnOffVideo: boolean;
+    waitingRoom: boolean;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export * from './channelData';
+export * from './conferenceData';
+export * from './groupData';
+export * from './user';
+export * from './userPreferences';
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { ChannelData } from './channelData';
+
+export type GroupData = ChannelData & {
+    broadcast?: boolean;
+    encrypted?: boolean;
+    teamId?: string;
+    teamMain?: boolean;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { UserRoles, UserStatus } from '../../../constants';
+
+export type User = {
+    __rooms: Array<unknown>;
+    _id: string;
+    _updatedAt: Date;
+    active: boolean;
+    createdAt: Date;
+    emails: Array<string>;
+    name: string;
+    roles: Array<UserRoles>;
+    settings: object;
+    status: UserStatus;
+    type: UserRoles;
+    username: string;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { Message } from '../../../models';
+
+export type GetHistoryData = {
+    message: {
+        msg: string;
+        result: Array<Message>;
+        unreadNotLoaded: number;
+    };
+    success: boolean;
+};
+
+export type GetHistoryRequestParams = {
+    end: number;
+    limit: number;
+    ls: Date;
+    rid: string;
+    showThreadMessages: boolean;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { ConferenceData } from '../models/conferenceData';
+
+export type SccGetConferenceInfo = {
+    data: ConferenceData;
+    success: boolean;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+type LoginViaTokenProps = {
+    password?: never;
+    token: string;
+    userName?: never;
+};
+
+type LoginViaCredentialsProps = {
+    password: string;
+    token?: never;
+    userName: string;
+};
+
+export type LoginRequestParams = LoginViaTokenProps | LoginViaCredentialsProps;
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { RoomType } from '../../../constants/rooms';
+
+export type DirectRoomData = {
+    _id: string;
+    rid: string;
+    t: RoomType;
+    usernames: Array<string>;
+};
+
+export type DirectRoomResponse = {
+    room: DirectRoomData;
+    success: boolean;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export type AddUsersToRoomRequestParams = {
+    rid: string;
+    users: Array<string>;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export type SccCallStartData = {
+    message: {
+        msg: string;
+    };
+    success: boolean;
+};
+
+export type SccCallStartRequestParams = {
+    all: boolean;
+    conferenceNumber: string;
+    notify: boolean;
+    rid: string;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { RoomType } from '../../../constants';
+
+export enum RoleName {
+    Leader = 'Leader',
+    Moderator = 'Moderator',
+    Owner = 'Owner',
+}
+
+export type RoomTypeForApi = Exclude<RoomType, RoomType.Team | RoomType.Thread>;
+
+export type SetUserRoleRequestParams = {
+    roleName: RoleName;
+    roleValue: boolean;
+    roomId: string;
+    t: RoomTypeForApi;
+    userId: string;
+};
+
+export type SetUserRoleResponse = {
+    success: boolean;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { RoomType } from '../../../constants';
+import { ChannelData } from '../models';
+
+export type ChannelRoomType = Extract<
+    RoomType,
+    RoomType.PublicChannel | RoomType.Group
+>;
+
+export type RemoveUserFromChannelRequestParams = {
+    rid: string;
+    roomType: ChannelRoomType;
+    username: string;
+};
+
+export type RemoveUserFromChannelResponse = {
+    channel: ChannelData;
+    success: boolean;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export type ReadRoomResponse = {
+    success: boolean;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import FormData from 'form-data';
+
+export type ErrorAttachmentData = {
+    error: string;
+    errorType: string;
+    success: boolean;
+};
+
+export type SendAttachmentRequestParams = {
+    form: FormData;
+    rid: string;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { User } from '../models';
+
+export type UserResponse = {
+    success: boolean;
+    user: User;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { UserRoles } from '../../../constants';
+
+export { UserRoles };
+
+export type CreateUserRequestParams = {
+    email: string;
+    name: string;
+    password: string;
+    roles?: UserRoles[];
+    userName: string;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { RoomType, SystemMessages } from '../../../constants';
+import { Message } from '../../../models';
+
+export type SaveRoomSettingsData = {
+    message: Message;
+    success: boolean;
+};
+
+export type SaveRoomSettingsRequestParams = {
+    encrypted?: boolean;
+    joinCode?: string;
+    reactWhenReadOnly?: boolean;
+    readOnly?: boolean;
+    rid: string;
+    roomAnnouncement?: string;
+    roomDescription?: string;
+    roomName?: string;
+    roomTopic?: string;
+    roomType?: RoomType;
+    systemMessages?: Array<SystemMessages>;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export type CreatePrivateChannelRequestParams = CreateTeamRequestParams & {
+    teamId?: string;
+};
+
+export type CreatePublicChannelRequestParams = Omit<
+    CreatePrivateChannelRequestParams,
+    'encrypted'
+>;
+
+export type CreateTeamRequestParams = {
+    encrypted: boolean;
+    members: string[];
+    name: string;
+    readOnly: boolean;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { ChannelData, GroupData } from '../models';
+
+export type GetRoomInfoByRoomIdRequestParams = {
+    rid: string;
+    roomName?: string;
+};
+
+export type GetRoomInfoByRoomNameRequestParams = {
+    rid?: string;
+    roomName: string;
+};
+
+export type GetRoomInfoRequestParams =
+    | GetRoomInfoByRoomIdRequestParams
+    | GetRoomInfoByRoomNameRequestParams;
+
+export type GetRoomInfoResponse = {
+    room: GroupData | ChannelData;
+    success: boolean;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { UserPreferences } from '../models/userPreferences';
+
+export type UserPreferencesData = {
+    user: {
+        _id: string;
+        settings: {
+            preferences: UserPreferences;
+        };
+    };
+};
+
+export type UserPreferencesRequestParams = {
+    data: UserPreferences;
+    userId: string;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { Message } from '../../../models';
+
+export type SendMessageByGroupNameRequestParams = {
+    groupName: string;
+    msg: string;
+};
+
+export type SendMessageRequestParams = {
+    message: SendMessageToThreadParams | SendMessageByRidParams;
+};
+
+export type SendMessageToThreadParams = {
+    msg: string;
+    rid?: never;
+    tmid: string;
+};
+
+export type SendMessageByRidParams = {
+    msg: string;
+    rid: string;
+    tmid?: never;
+};
+
+export type SendMessageData = {
+    message: Message;
+    success: boolean;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { ConferenceData } from '../models/conferenceData';
+
+export type SccCreateConferenceData = {
+    message: {
+        msg: string;
+        result: ConferenceData;
+    };
+    success: boolean;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+type SettingsItem = {
+    _id: string;
+    enterprise: boolean;
+    value: string | Array<string> | number | boolean;
+};
+
+export type SettingsData = {
+    count: number;
+    offset: number;
+    settings: Array<SettingsItem>;
+    success: boolean;
+    total: number;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { type AxiosResponse } from 'axios';
+
+export * from './models';
+
+export * from './restAPI/addUserToRoom';
+export * from './restAPI/changeRoles';
+export * from './restAPI/createChannel';
+export * from './restAPI/createDirectRoom';
+export * from './restAPI/createUser';
+export * from './restAPI/getHistory';
+export * from './restAPI/getRoomInfo';
+export * from './restAPI/getSettings';
+export * from './restAPI/getUserInfoByUsername';
+export * from './restAPI/login';
+export * from './restAPI/readRoom';
+export * from './restAPI/removeUserFromRoom';
+export * from './restAPI/saveRoomSettings';
+export * from './restAPI/sccCallStart';
+export * from './restAPI/sccCreateConference';
+export * from './restAPI/sccGetConferenceInfo';
+export * from './restAPI/sendAttachment';
+export * from './restAPI/sendMessage';
+export * from './restAPI/setUserPreferences';
+export * from './utilsTypes';
+export type RestResponse<T> = Promise<AxiosResponse<T> | undefined>;
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { AxiosError, type AxiosResponse } from 'axios';
+
+import { Errors, RestErrors, StatusCode } from '../constants';
+import { ErrorData, RestClientError } from '../errorHandlers';
+import { isErrorDataString } from './typeGuards';
+
+type AxiosErrorResponseData = string | ErrorData;
+export type AxiosErrorResponse = AxiosResponse<AxiosErrorResponseData>;
+export type AxiosErrorWithData = AxiosError<AxiosErrorResponseData>;
+
+export const handleRestErrorByResponse = (
+    error?: AxiosErrorWithData | AxiosResponse | RestClientError,
+    specificMethodErrorHandler?: (error: ErrorData) => void,
+): never | void => {
+    if (!error) {
+        console.warn('RestClient processRestError() called without argument');
+        return;
+    }
+    const isErrTypeofRestClientError = isRestClientError(error);
+    // skip already formatted errors
+    if (isErrTypeofRestClientError) {
+        throw error;
+    }
+    const isAxiosError = 'isAxiosError' in error;
+    if (isAxiosError) {
+        if (specificMethodErrorHandler) {
+            handleSpecificMethodError(error, specificMethodErrorHandler);
+        }
+
+        switch (error.code) {
+            case RestErrors.WrongShortServer:
+            case RestErrors.WrongPort:
+            case RestErrors.WrongProtocolLocalServer:
+            case RestErrors.WrongServerAddress:
+                throw new RestClientError(Errors.WrongServerAddress, error);
+            case RestErrors.LostConnectionErrorCode:
+                throw new RestClientError(Errors.LostServerConnection, error);
+        }
+
+        const response = error.response || ({} as AxiosErrorResponse);
+        const status = response.status;
+        if (status === StatusCode.Unauthorized) {
+            throw new RestClientError(Errors.AuthorizationError, error);
+        }
+        const restError = response.data as AxiosErrorResponseData;
+        if (
+            // related to SMC-2754
+            restError === RestErrors.TotpRequired ||
+            restError === RestErrors.TotpInvalid
+        ) {
+            throw new RestClientError(Errors.TotpError, error);
+        }
+
+        // should be very last
+        if (error.code === RestErrors.BadRequest) {
+            throw new RestClientError(Errors.InvalidRequest, error);
+        }
+    }
+    throw new RestClientError(Errors.CommonError, error);
+};
+
+export function handleSpecificMethodError(
+    error: AxiosErrorWithData,
+    specificMethodErrorHandler?: (error: ErrorData) => void,
+): void | never {
+    const response = error.response || ({} as AxiosErrorResponse);
+    const restResponse = response.data;
+    if (!isErrorDataString(restResponse)) {
+        specificMethodErrorHandler && specificMethodErrorHandler(restResponse);
+    }
+}
+
+export function isRestClientError(
+    error: AxiosErrorWithData | AxiosResponse | RestClientError,
+): boolean {
+    const isAmountOfKeysFit = Object.keys(error).length == 2;
+    if (!isAmountOfKeysFit) {
+        return false;
+    }
+    const hasCode = 'code' in error;
+    if (!hasCode) {
+        return false;
+    }
+    const hasError = 'error' in error;
+    if (!hasError) {
+        return false;
+    }
+    return true;
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { RestClientError } from '../errorHandlers';
+import { Errors } from '../constants';
+
+import type { AxiosResponse } from 'axios';
+export const validateRestResponse = (
+    response: AxiosResponse<any, any>,
+): void => {
+    if (!response.data.success) {
+        throw new RestClientError(
+            response.data.error || Errors.CommonError,
+            response,
+        );
+    }
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { ErrorData } from '../errorHandlers';
+
+export const isErrorDataString = (item: ErrorData | string): item is string => {
+    return typeof item === 'string';
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { type AxiosResponse } from 'axios';
+
+import { Errors } from '../constants';
+import { RestClientError } from '../errorHandlers';
+import { CallMeteorRequest, MeteorRequestData } from '../types';
+import {
+    AxiosErrorWithData,
+    handleRestErrorByResponse,
+} from './handleRestErrorByResponse';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const handleMeteorResponse = (response: any) => {
+    const message = JSON.parse(response.data.message);
+    const error = message.error;
+    if (response.data.success && !error) {
+        return message.result;
+    } else {
+        const code = error.error || Errors.CommonError;
+        const restError = error || response;
+        throw new RestClientError(code, restError);
+    }
+};
+
+export const parseMeteorRequestArguments = ({
+    method,
+    params = [],
+}: MeteorRequestData): {
+    data: {
+        message: string;
+    };
+    url: string;
+} => {
+    const url = `method.call/${method}`;
+    const data = {
+        message: JSON.stringify({
+            method,
+            params,
+        }),
+    };
+    const args = { url, data };
+    return args;
+};
+
+export const callMeteorRequest: CallMeteorRequest = async (
+    { httpClient, method, params = [] },
+    specificMethodErrorHandler,
+) => {
+    const { url, data } = parseMeteorRequestArguments({ method, params });
+    return await httpClient
+        .post(url, data)
+        .then((response: any) => handleMeteorResponse(response))
+        .catch((error: AxiosErrorWithData | AxiosResponse) =>
+            handleRestErrorByResponse(error, specificMethodErrorHandler),
+        );
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import {
+    AxiosError,
+    type AxiosResponse,
+    type InternalAxiosRequestConfig,
+} from 'axios';
+
+import { Errors, RestErrors, StatusCode } from '../constants';
+import {
+    ErrorData,
+    RestClientError,
+    addUserToRoomErrorHandler,
+} from '../errorHandlers';
+import {
+    AxiosErrorWithData,
+    handleRestErrorByResponse,
+    handleSpecificMethodError,
+    isRestClientError,
+} from './handleRestErrorByResponse';
+
+const getAxiosResponseError = (
+    errorType?: Errors | RestErrors,
+): AxiosResponse<ErrorData> => {
+    return {
+        data: {
+            errorType: errorType ?? Errors.CommonError,
+            details: {},
+            error: '',
+            success: true,
+        },
+        status: StatusCode.OK,
+        statusText: 'success',
+        headers: {},
+        config: {} as InternalAxiosRequestConfig,
+    };
+};
+
+const getAxiosErrorWithData = (
+    errorType?: Errors | RestErrors,
+): AxiosError<ErrorData> => {
+    const axiosResponse = getAxiosResponseError(errorType);
+    const err = new AxiosError(
+        undefined,
+        errorType ?? Errors.EmptyResult,
+        undefined,
+        undefined,
+        axiosResponse,
+    );
+    return { ...err, isAxiosError: true };
+};
+
+describe('handleRestErrorByResponse', () => {
+    describe('isRestClientError', () => {
+        it('should return true if RestClientError was passed', () => {
+            const restClientErr = new RestClientError(Errors.CommonError, {});
+            expect(isRestClientError(restClientErr)).toBe(true);
+        });
+        it('should return false if AxiosError was passed', () => {
+            const emptyAxiosErr: AxiosError<ErrorData> = new AxiosError();
+            expect(isRestClientError(emptyAxiosErr)).toBe(false);
+        });
+    });
+    describe('handleSpecificMethodError', () => {
+        it('should throw and error if InvalidUser error was passed', () => {
+            const emptyAxiosErr = getAxiosErrorWithData(Errors.InvalidUsername);
+            expect(() =>
+                handleSpecificMethodError(
+                    emptyAxiosErr,
+                    addUserToRoomErrorHandler,
+                ),
+            ).toThrow();
+        });
+        it('should return undefined if string was passed as an error', () => {
+            const emptyAxiosErr = getAxiosErrorWithData();
+            expect(
+                handleSpecificMethodError(
+                    emptyAxiosErr,
+                    addUserToRoomErrorHandler,
+                ),
+            ).toBe(undefined);
+        });
+    });
+    describe('handleRestErrorByResponse', () => {
+        it('should throw RestClientError with CommonError code', () => {
+            const restClientErr = new RestClientError(Errors.CommonError, {});
+            try {
+                handleRestErrorByResponse(restClientErr);
+            } catch (error) {
+                expect(error).toBeInstanceOf(RestClientError);
+                expect((error as RestClientError).code).toBe(
+                    Errors.CommonError,
+                );
+            }
+        });
+        it('should throw RestClientError with LostServerConnection code', () => {
+            const lostConnectionAxiosErr = getAxiosErrorWithData(
+                RestErrors.LostConnectionErrorCode,
+            );
+            try {
+                handleRestErrorByResponse(lostConnectionAxiosErr);
+            } catch (error) {
+                expect(error).toBeInstanceOf(RestClientError);
+                expect((error as RestClientError).code).toBe(
+                    Errors.LostServerConnection,
+                );
+            }
+        });
+        it('should throw RestClientError with WrongServerAddress code', () => {
+            const wrongShortServerAxiosErr = getAxiosErrorWithData(
+                RestErrors.WrongShortServer,
+            );
+            try {
+                handleRestErrorByResponse(wrongShortServerAxiosErr);
+            } catch (error) {
+                expect(error).toBeInstanceOf(RestClientError);
+                expect((error as RestClientError).code).toBe(
+                    Errors.WrongServerAddress,
+                );
+            }
+        });
+        it('should throw RestClientError with WrongServerAddress code', () => {
+            const wrongPortAxiosErr = getAxiosErrorWithData(
+                RestErrors.WrongPort,
+            );
+            try {
+                handleRestErrorByResponse(wrongPortAxiosErr);
+            } catch (error) {
+                expect(error).toBeInstanceOf(RestClientError);
+                expect((error as RestClientError).code).toBe(
+                    Errors.WrongServerAddress,
+                );
+            }
+        });
+        it('should throw RestClientError with WrongServerAddress code', () => {
+            const wrongProtocolLocalServerAxiosErr = getAxiosErrorWithData(
+                RestErrors.WrongProtocolLocalServer,
+            );
+            try {
+                handleRestErrorByResponse(wrongProtocolLocalServerAxiosErr);
+            } catch (error) {
+                expect(error).toBeInstanceOf(RestClientError);
+                expect((error as RestClientError).code).toBe(
+                    Errors.WrongServerAddress,
+                );
+            }
+        });
+        it('should throw RestClientError with TotpError code', () => {
+            const restClientError = new RestClientError(Errors.TotpError, {});
+            try {
+                handleRestErrorByResponse(restClientError);
+            } catch (error) {
+                expect(error).toBeInstanceOf(RestClientError);
+                expect((error as RestClientError).code).toBe(Errors.TotpError);
+            }
+        });
+        it('should throw RestClientError with TotpError code', () => {
+            const totpAxiosError = {
+                response: {
+                    data: RestErrors.TotpRequired,
+                },
+                isAxiosError: true,
+            } as unknown as AxiosErrorWithData;
+            try {
+                handleRestErrorByResponse(totpAxiosError);
+            } catch (error) {
+                expect(error).toBeInstanceOf(RestClientError);
+                expect((error as RestClientError).code).toBe(Errors.TotpError);
+            }
+        });
+        it('should return undefined if no error was passed', () => {
+            expect(handleRestErrorByResponse(undefined)).toBe(undefined);
+        });
+        it('should throw CommonError if js error was passed', () => {
+            const generalError = new Error('general error');
+            try {
+                handleRestErrorByResponse(
+                    generalError as AxiosError<ErrorData>,
+                );
+            } catch (error) {
+                expect(error).toBeInstanceOf(RestClientError);
+                expect((error as RestClientError).code).toBe(
+                    Errors.CommonError,
+                );
+            }
+        });
+        it('should throw and error if InvalidUser error was passed', () => {
+            const emptyAxiosErr = getAxiosErrorWithData(Errors.InvalidUser);
+            try {
+                handleRestErrorByResponse(
+                    emptyAxiosErr,
+                    addUserToRoomErrorHandler,
+                );
+            } catch (error) {
+                expect(error).toBeInstanceOf(RestClientError);
+                expect((error as RestClientError).code).toBe(
+                    Errors.InvalidUser,
+                );
+            }
+        });
+    });
+});
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { isErrorDataString } from './typeGuards';
+
+describe('typeGuards', () => {
+    describe('isErrorDataString', () => {
+        it('should return true if string is passed', () => {
+            const str = 'str';
+            expect(isErrorDataString(str)).toBe(true);
+        });
+        it('should return false if boolean is passed', () => {
+            const bool = false;
+            // @ts-expect-error passed wrong type on purpose
+            expect(isErrorDataString(bool)).toBe(false);
+        });
+        it('should return false if object is passed', () => {
+            const obj = {};
+            // @ts-expect-error passed wrong type on purpose
+            expect(isErrorDataString(obj)).toBe(false);
+        });
+    });
+});
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { validateRestResponse } from './validateRestResponse';
+import { AxiosErrorResponse } from './handleRestErrorByResponse';
+import { StatusCode } from '../constants';
+
+const getAxiosResponseWithErrorData = (
+    isSuccess = true,
+): AxiosErrorResponse => {
+    return {
+        data: {
+            details: {},
+            error: '',
+            errorType: '',
+            success: isSuccess,
+        },
+        status: StatusCode.OK,
+        statusText: 'success',
+        headers: {},
+        // @ts-expect-error
+        config: {},
+    };
+};
+
+describe('validateRestResponse', () => {
+    it('should not throw an error when SUCCESS is true', () => {
+        const response = getAxiosResponseWithErrorData();
+        expect(validateRestResponse(response)).toBe(undefined);
+    });
+    it('should throw an error when SUCCESS is false', () => {
+        const response = getAxiosResponseWithErrorData(false);
+        expect(() => validateRestResponse(response)).toThrow();
+    });
+});
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import axios, { type AxiosInstance } from 'axios';
+import MockAdapter from 'axios-mock-adapter';
+
+import {
+    handleMeteorResponse,
+    parseMeteorRequestArguments,
+} from './callMeteorRequest';
+import { RestErrors, StatusCode } from '../constants';
+
+const RESPONSE = 'axios-response';
+const ADD_USERS_PARAMS = [
+    {
+        rid: 'roomId',
+        users: ['user'],
+    },
+];
+const METHOD_CALL = 'method.call/';
+const METEOR_METHOD = 'addUsersToRoom';
+
+describe('callMeteorRequest', () => {
+    describe('handleMeteorResponse', () => {
+        let httpClient: AxiosInstance;
+        let mock: MockAdapter;
+        beforeEach(function () {
+            httpClient = axios.create();
+            mock = new MockAdapter(httpClient);
+        });
+
+        it(`should return ${RESPONSE} if correct params were passed`, async () => {
+            const data = {
+                message: JSON.stringify({
+                    result: RESPONSE,
+                }),
+                success: true,
+            };
+            const params = { params: ADD_USERS_PARAMS };
+
+            mock.onPost(`${METHOD_CALL}${METEOR_METHOD}`, params).reply(
+                StatusCode.OK,
+                data,
+            );
+
+            const response = await httpClient.post(
+                `${METHOD_CALL}${METEOR_METHOD}`,
+                params,
+            );
+            expect(handleMeteorResponse(response)).toEqual(RESPONSE);
+        });
+        it('should throw error if response message contains error', async () => {
+            const data = {
+                message: JSON.stringify({
+                    result: RESPONSE,
+                    error: { errorType: RestErrors.TotpInvalid },
+                }),
+                success: false,
+            };
+
+            const params = { params: ADD_USERS_PARAMS };
+
+            mock.onPost(`${METHOD_CALL}${METEOR_METHOD}`, params).reply(
+                StatusCode.OK,
+                data,
+            );
+
+            const response = await httpClient.post(
+                `${METHOD_CALL}${METEOR_METHOD}`,
+                params,
+            );
+            expect(() => handleMeteorResponse(response)).toThrow();
+        });
+    });
+    describe('parseMeteorRequestArguments', () => {
+        it('should return url and parsed data', () => {
+            const data = {
+                method: METEOR_METHOD,
+                params: ADD_USERS_PARAMS,
+            };
+            const args = {
+                url: `${METHOD_CALL}${METEOR_METHOD}`,
+                data: {
+                    message: JSON.stringify(data),
+                },
+            };
+            expect(parseMeteorRequestArguments(data)).toStrictEqual(args);
+        });
+    });
+});
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { Errors } from '../constants';
+import { RestClientError } from './RestClientError';
+import { ErrorData } from './types';
+
+export function removeUserFromRoomErrorHandler(error: ErrorData): void {
+    if (error.errorType === Errors.RoomNotFound) {
+        throw new RestClientError(Errors.RoomNotFound, error);
+    }
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { Errors } from '../constants';
+import { RestClientError } from './RestClientError';
+import { ErrorData } from './types';
+
+export function createDirectErrorHandler(error: ErrorData): void {
+    if (error.errorType === Errors.InvalidUser) {
+        throw new RestClientError(Errors.InvalidUser, error);
+    }
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { Errors, RestErrors } from '../constants';
+import { RestClientError } from './RestClientError';
+import { ErrorData } from './types';
+
+export function getUserInfoErrorHandler(error: ErrorData): void {
+    switch (error.errorType) {
+        case Errors.InvalidUser:
+            throw new RestClientError(Errors.InvalidName, error);
+        case RestErrors.WrongArguments:
+            throw new RestClientError(Errors.InvalidRequest, error);
+    }
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { Errors } from '../constants';
+import { RestClientError } from './RestClientError';
+import { ErrorData } from './types';
+
+export function getRoomInfoErrorHandler(error: ErrorData): void {
+    if (error.errorType === Errors.RoomNotFound) {
+        throw new RestClientError(Errors.RoomNotFound, error);
+    }
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { Errors } from '../constants';
+import { RestClientError } from './RestClientError';
+import { ErrorData } from './types';
+
+export function sendMessageErrorHandler(error: ErrorData): void {
+    if (error.errorType === Errors.MessageSizeExceeded) {
+        throw new RestClientError(Errors.MessageSizeExceeded, error);
+    }
+    /*
+     * error.error is not a mistake!!!
+     * server returns Error with field named `error` only in `sendMessageByRid`
+     * in all other requests we receive `Error` like `error.errorType`
+     */
+    if (error.error === Errors.InvalidRoom) {
+        throw new RestClientError(Errors.InvalidRoom, error);
+    }
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { Errors, RestErrors } from '../constants';
+import { RestClientError } from './RestClientError';
+import { ErrorData } from './types';
+
+export function saveRoomSettingsErrorHandler(error: ErrorData): void {
+    switch (error.errorType) {
+        case Errors.InvalidRoom:
+            throw new RestClientError(Errors.InvalidRoom, error);
+        case Errors.InvalidName:
+            throw new RestClientError(Errors.InvalidName, error);
+        case RestErrors.ChannelNameExists:
+            throw new RestClientError(Errors.ChannelNameAlreadyExists, error);
+    }
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export type ErrorData = {
+    details: object;
+    error: string;
+    errorType: string;
+    success: boolean;
+};
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { Errors } from '../constants';
+
+export class RestClientError extends Error {
+    code: string;
+    error: unknown; // type will be unknown as long as server responses are inconsistent
+    constructor(code = Errors.CommonError, error: unknown) {
+        super();
+        this.code = code;
+        this.error = error;
+    }
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { Errors } from '../constants';
+import { RestClientError } from './RestClientError';
+import { ErrorData } from './types';
+
+export function sendAttachmentErrorHandler(error: ErrorData): void {
+    switch (error.errorType) {
+        case Errors.FileToLarge:
+            throw new RestClientError(Errors.FileToLarge, error);
+        case Errors.InvalidRoom:
+            throw new RestClientError(Errors.InvalidRoom, error);
+    }
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export * from './RestClientError';
+export * from './addUserToRoomErrorHandler';
+export * from './createRoomErrorHandler';
+export * from './removeUserToRoomErrorHandler';
+export * from './sendAttachmentErrorHandler';
+export * from './sendMessageErrorHandler';
+export * from './RestClientError';
+export * from './readRoomErrorHandler';
+export * from './createDirectErrorHandler';
+export * from './getRoomInfoErrorHandler';
+export * from './setUserRoleErrorHandler';
+export * from './types';
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { Errors, RestErrors } from '../constants';
+import { RestClientError } from './RestClientError';
+import { ErrorData } from './types';
+
+export function createRoomErrorHandler(error: ErrorData): void {
+    switch (error.errorType) {
+        case RestErrors.ChannelNameExists:
+            throw new RestClientError(Errors.ChannelNameAlreadyExists, error);
+        case Errors.InvalidName:
+            throw new RestClientError(Errors.InvalidName, error);
+    }
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { Errors } from '../constants';
+import { RestClientError } from './RestClientError';
+import { ErrorData } from './types';
+
+export function setUserRoleErrorHandler(error: ErrorData): void {
+    switch (error.errorType) {
+        case Errors.InvalidUser:
+            throw new RestClientError(Errors.InvalidUser, error);
+        case Errors.UserAlreadyModerator:
+            throw new RestClientError(Errors.UserAlreadyModerator, error);
+        case Errors.UserNotModerator:
+            throw new RestClientError(Errors.UserNotModerator, error);
+        case Errors.UserAlreadyOwner:
+            throw new RestClientError(Errors.UserAlreadyOwner, error);
+        case Errors.UserNotOwner:
+            throw new RestClientError(Errors.UserNotOwner, error);
+        case Errors.UserAlreadyLeader:
+            throw new RestClientError(Errors.UserAlreadyLeader, error);
+        case Errors.UserNotLeader:
+            throw new RestClientError(Errors.UserNotLeader, error);
+        case Errors.UserNotInRoom:
+            throw new RestClientError(Errors.UserNotInRoom, error);
+    }
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { Errors } from '../constants';
+import { RestClientError } from './RestClientError';
+import { ErrorData } from './types';
+
+export function addUserToRoomErrorHandler(error: ErrorData): void {
+    switch (error.errorType) {
+        case Errors.InvalidUsername:
+            throw new RestClientError(Errors.InvalidUsername, error);
+        case Errors.InvalidUser:
+            throw new RestClientError(Errors.InvalidUser, error);
+        case Errors.CantInviteForDirectRoom:
+            throw new RestClientError(Errors.CantInviteForDirectRoom, error);
+    }
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+import { Errors } from '../constants';
+import { RestClientError } from './RestClientError';
+import { ErrorData } from './types';
+
+export function readRoomErrorHandler(error: ErrorData): void {
+    if (error.errorType === Errors.RoomNotFound) {
+        throw new RestClientError(Errors.RoomNotFound, error);
+    }
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export enum Errors {
+    AuthorizationError = 'rest-client-is-not-authorized',
+    CantInviteForDirectRoom = 'error-cant-invite-for-direct-room',
+    ChannelNameAlreadyExists = 'channel-already-exist-static',
+    CommonError = 'common-error',
+    EmptyResult = 'dont-have-result',
+    FileToLarge = 'error-file-too-large',
+    InvalidArguments = 'invalid-argument',
+    InvalidName = 'error-invalid-name',
+    InvalidPathToAttachment = 'invalid-path-to-attachment',
+    // second factor is invalid or unset
+    InvalidRequest = 'invalid-request',
+    InvalidRoom = 'error-invalid-room',
+    InvalidUser = 'error-invalid-user',
+    InvalidUsername = 'error-invalid-username',
+    LostServerConnection = 'lost-server-connection',
+    MessageSizeExceeded = 'error-message-size-exceeded',
+    NoSuchFileOrDirectory = 'no-such-file-or-directory',
+    RoomNotFound = 'error-room-not-found',
+    TotpError = 'rest-client-totp-error',
+    UserAlreadyLeader = 'error-user-already-leader',
+    UserAlreadyModerator = 'error-user-already-moderator',
+    UserAlreadyOwner = 'error-user-already-owner',
+    UserNotInRoom = 'error-user-not-in-room',
+    UserNotLeader = 'error-user-not-leader',
+    UserNotModerator = 'error-user-not-moderator',
+    UserNotOwner = 'error-user-not-owner',
+    WrongServerAddress = 'wrong-server-address',
+    WrongServerPort = 'wrong-server-port',
+}
+
+export enum RestErrors {
+    BadRequest = 'ERR_BAD_REQUEST',
+    ChannelNameExists = 'Channel_already_exist_static',
+    LostConnectionErrorCode = 'EPIPE',
+    TotpInvalid = 'totp-invalid',
+    TotpRequired = 'totp-required',
+    WrongArguments = "Cannot set property 'canViewAllInfo' of undefined",
+    WrongPort = 'ECONNRESET',
+    WrongProtocolLocalServer = 'EPROTO',
+    WrongServerAddress = 'ENOTFOUND',
+    WrongShortServer = 'ECONNREFUSED',
+}
+
+export enum StatusCode {
+    OK = 200,
+    Unauthorized = 401,
+}
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export * from './constants';
+
+export * from './restClient';
+export * from './types';
+/*
+ * Copyright (c) New Cloud Technologies, Ltd., 2013-2023
+ *
+ * You can not use the contents of the file in any way without New Cloud Technologies, Ltd. written permission.
+ * To obtain such a permit, you should contact New Cloud Technologies, Ltd. at http://ncloudtech.com/contact.html
+ *
+ */
+
+export * from './wsClient';
+export * from './restClient';
+export * from './constants';
+export * from './models';

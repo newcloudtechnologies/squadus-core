@@ -1,0 +1,1 @@
+{"version":3,"file":"readRoomErrorHandler.js","sourceRoot":"","sources":["../../../src/restClient/errorHandlers/readRoomErrorHandler.ts"],"names":[],"mappings":";AAAA;;;;;;GAMG;;;AAEH,4CAAsC;AACtC,uDAAoD;AAGpD,SAAgB,oBAAoB,CAAC,KAAgB;IACjD,IAAI,KAAK,EAAE,SAAS,KAAK,kBAAM,CAAC,YAAY,EAAE;QAC1C,MAAM,IAAI,iCAAe,CAAC,kBAAM,CAAC,YAAY,EAAE,KAAK,CAAC,CAAC;KACzD;AACL,CAAC;AAJD,oDAIC"}
